@@ -6,27 +6,19 @@
 //
 
 import SwiftUI
-import SwiftData
+
+// I'm gonna practice writing more comments in my code
 
 @main
 struct rayApp: App {
-    var sharedModelContainer: ModelContainer = {
-        let schema = Schema([
-            Item.self,
-        ])
-        let modelConfiguration = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
-
-        do {
-            return try ModelContainer(for: schema, configurations: [modelConfiguration])
-        } catch {
-            fatalError("Could not create ModelContainer: \(error)")
-        }
-    }()
-
+    @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
+ 
     var body: some Scene {
-        WindowGroup {
-            ContentView()
-        }
-        .modelContainer(sharedModelContainer)
+        Settings { EmptyView() }
     }
 }
+ 
+// TODO: make the notes waaay better
+// TODO: improve the expansion appear/disappear animation
+// TODO: add camera module
+// TODO: make ray update checks auto (liek when new app installed it cant see it yet)

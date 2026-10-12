@@ -5,6 +5,11 @@
 //  Created by Dylan Karunanayake on 9/10/2026.
 //
 
+//
+//  SettingsView.swift
+//  ray
+//
+
 import SwiftUI
 
 enum SettingsTab: String, CaseIterable, Identifiable {
@@ -60,21 +65,26 @@ struct SettingsView: View {
 
 // MARK: - General
 
+// These keys are the same ones ContentView reads, so moving a slider changes the dropdown timing straight away
 struct GeneralSettings: View {
-    @AppStorage("ray.typingDelay") private var typingDelay: Double = 0.8
-    @AppStorage("ray.emptyDelay") private var emptyDelay: Double = 3.0
+    @AppStorage("ray_typing_delay") private var typingDelay: Double = 0.8
+    @AppStorage("ray_still_delay") private var stillDelay: Double = 3.0
+    @AppStorage("ray_onboarded") private var onboarded: Bool = false
 
     var body: some View {
         Form {
             Section("Results dropdown") {
                 delayRow("While typing", value: $typingDelay, range: 0.2...2.0)
-                delayRow("Nothing typed", value: $emptyDelay, range: 0.5...8.0)
+                delayRow("Nothing typed", value: $stillDelay, range: 0.5...8.0)
             }
 
             Section {
+                Button("Replay the welcome tour") {
+                    onboarded = false
+                }
                 Button("Reset to defaults") {
                     typingDelay = 0.8
-                    emptyDelay = 3.0
+                    stillDelay = 3.0
                 }
             }
         }

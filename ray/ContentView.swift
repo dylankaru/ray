@@ -8,9 +8,17 @@
 import SwiftUI
 
 // I'm gonna practice writing comments
+/*
+ 
+ Quick terminology so I don't forget..
+ Launchpad:      the rounded squircle that acts as the actual launcher
+ Map:            the dropdown of related command options
+ Option Command: the suggested/main action given in the launchpad
+ Command Option: the suggested/list of actions given in the map
+ 
+ */
 
-/// Mode is what the launcher is currently doing with what you type
-/// Find searches apps, files and the web all at once, Calc and Note do what they say
+// Mode is what the launcher is currently doing with what you type
 enum Mode: Int, CaseIterable {
     case find, calc, note
 
@@ -32,7 +40,7 @@ enum Mode: Int, CaseIterable {
     }
 }
 
-/// PaneAction is the expected shape of an command option in ray
+/// PaneAction is the expected shape of an option command in ray
 /// All parameters are required
 struct PaneAction {
     let title: String
@@ -55,8 +63,87 @@ struct RayMark: Shape {
     }
 }
 
+// Different types of animations for the emoji that lives in the launchpad
+enum OnboardingEmojiAnimation {
+    case wave
+}
+
+/// Things the Onboarding can wait for you to do
+enum OnboardingTask {
+    case typing, modeSwitch, arrows, number
+}
+
+/// One page of the first-run onbarding that lives in the dropdown
+/// Give it either an emoji or an SF Symbol, keys are shown as keycaps under the text
+/// If it has tasks, the page waits for you to do one of them (with the real keys) and then moves on by itself
+struct OnboardingStep {
+    var emoji: String? = nil
+    var animation: OnboardingEmojiAnimation? = nil
+    var symbol: String? = nil
+    let title: String
+    let body: String
+    var keys: [String] = []
+    var showsMarkerDemo: Bool = false
+    var tasks: [OnboardingTask] = []
+    var hint: String? = nil
+}
+
+enum Onboarding {
+    // Add, remove or reorder pages here, everything else adapts to the count
+    static let steps: [OnboardingStep] = [
+        OnboardingStep(emoji: "👋",
+                       animation: OnboardingEmojiAnimation.wave,
+                       symbol: "faceid",
+                       title: "Welcome to Ray",
+                       body: "This is just an onboarding so you don't get lost, this won't take very long."),
+        OnboardingStep(symbol: "keyboard",
+                       title: "Summon it from anywhere",
+                       body: "Press these keys in any app. Click away or hit escape and it leaves.",
+                       keys: ["⌥", "Space"]),
+        OnboardingStep(symbol: "magnifyingglass",
+                       title: "Just start typing",
+                       body: "Apps, files and the web in one search. The letters you typed get highlighted so you can see why something matched.", // TODO: add AI messaging as well
+                       showsMarkerDemo: true,
+                       tasks: [.typing],
+                       hint: "Try searching for something"),
+        OnboardingStep(symbol: "plusminus",
+                       title: "Math and notes too",
+                       body: "Press Tab to switch modes, or start with = for a calculation and ' for a quick note.",
+                       keys: ["Tab", "=", "'"],
+                       tasks: [.modeSwitch],
+                       hint: "Try it, press Tab"),
+        OnboardingStep(symbol: "arrow.up.arrow.down",
+                       title: "Pick your result",
+                       body: "The list opens when you pause. Move with the arrows, jump with a number, open with return.",
+                       keys: ["↑↓", "⌘1", "↵"],
+                       tasks: [.arrows, .number],
+                       hint: "Try it, press ↓ or ⌘1"),
+        OnboardingStep(symbol: "checkmark.circle",
+                       title: "You're all set",
+                       body: "You can change anything later in Ray Settings. You can also replay the onboarding there."),
+    ]
+}
+
+// Marks a piece of text as highlighted, the renderer below looks for it
+struct MarkedAttribute: TextAttribute {}
+
+// Draws the marker pen. Every run of text tagged with MarkedAttribute gets one square yellow bar behind it
+// Letters that touch are grouped into a single run first, so they fuse into one highlight instead of separate boxes
+struct MarkerRenderer: TextRenderer {
+    var color: Color
+
+    func draw(layout: Text.Layout, in context: inout GraphicsContext) {
+        for line in layout {
+            for run in line where run[MarkedAttribute.self] != nil {
+                let r = run.typographicBounds.rect.insetBy(dx: 0, dy: 1) // dx 0 so it never spills onto the next letter
+                context.fill(Path(r), with: .color(color)) // square, like a real marker
+            }
+            context.draw(line) // text goes on top of the marker
+        }
+    }
+}
+
 // GlassCard is shape/body of the launcher, everything the user sees and interacts with will be housed here
-// The dark colour is a tint on the glass itself (not a fill behind it) so it morphs with the glass instead of popping in
 struct GlassCard: ViewModifier {
     let radius: CGFloat
 
@@ -65,17 +152,16 @@ struct GlassCard: ViewModifier {
         let edge = LinearGradient(colors: [Color.black.opacity(0.6), Color.black.opacity(0.6)], startPoint: .top, endPoint: .bottom)
         // I know it's barely noticable but why not
         return content
-            .glassEffect(.regular.tint(Color.black.opacity(0.125)).interactive(), in: s)
+            .glassEffect(.regular.tint(Color.black.opacity(0.22)).interactive(), in: s) // Glass is so good TODO: check if you can scale interaction intensity
             .overlay(s.strokeBorder(edge, lineWidth: 0.6))
             .shadow(color: .black.opacity(0.35), radius: 22, y: 9)
     }
 }
 
-// I wonder what this could b🫠
+// 🫠
 struct ContentView: View {
 
-    // The feel of the dropdown. Response = how fast it lands (lower is snappier),
-    // damping = how much it bounces at the end (1 = none, 0.72 = a small overshoot)
+    // The feel of the map
     private static let dropdownSpring = Animation.spring(response: 0.42, dampingFraction: 0.72)
     private static let rowSpring = Animation.spring(response: 0.32, dampingFraction: 0.78)
     private static let selectionSpring = Animation.spring(response: 0.28, dampingFraction: 0.78)
@@ -83,49 +169,58 @@ struct ContentView: View {
     // Defaults
     @AppStorage("ray_typing_delay") private static var typingDelay: Double = 0.8
     @AppStorage("ray_still_delay") private static var stillDelay: Double = 3.0
+    @AppStorage("ray_onboarded") private var onboarded: Bool = false // Onboarding related
 
     @State private var query: String = ""
     @State private var mode: Mode = .find
     @State private var selection: Int = 0
-    @State private var pool: [Item] = []            // every installed app, loaded once
-    @State private var results: [Item] = []         // what the tile and dropdown show right now
+    @State private var pool: [Item] = []
+    @State private var results: [Item] = []
+    @State private var onboardingStep: Int = 0 // Onboarding related
+    @State private var taskDone: Bool = false  // Onboarding related
     @State private var calcResult: String? = nil
-    @State private var fileEntries: [FileEntry] = [] // our own index of the home folder
-    @State private var fileHits: [Item] = []         // files matching the current query
+    @State private var fileEntries: [FileEntry] = []
+    @State private var fileHits: [Item] = []
     @State private var showDropdown: Bool = false
-    @State private var rowsRevealed: Bool = false   // drives the staggered row entrance
+    @State private var rowsRevealed: Bool = false
     @State private var dropdownTask: Task<Void, Never>? = nil
     @State private var actionIndex: Int = 0
     @State private var lastMouseLocation: CGPoint = .zero
+    @State private var showUtilityBar: Bool = true
+    @State private var isUpdateAvailable = false
     @FocusState private var focused: Bool
-    @Namespace private var ns          // the sliding row highlight
-    @Namespace private var glassNS     // lets the dropdown glass grow out of the launcher glass
+    @Namespace private var ns
+    @Namespace private var glassNS
 
     private let tileSize: CGFloat = 240
     private let rowHeight: CGFloat = 46
-    private let launcherRadius: CGFloat = 40
-    private let launcherPadding: CGFloat = 15
+    private let launcherRadius: CGFloat = 50
+    private let launcherPadding: CGFloat = 16
+    private let tileRadius: CGFloat = 38
     private let dropdownRadius: CGFloat = 28
     private let dropdownInset: CGFloat = 8
-    private let selectionTint = Color.accentColor.opacity(0.28)
+    private let selectionTint = Color.gray.opacity(0.3)
+    private let markerColor = Color.yellow.opacity(0.62)
 
-    // Concentric with the launcher, always the outer radius minus the padding, so changing either one stays correct
-    private var tileShape: RoundedRectangle {
-        RoundedRectangle(cornerRadius: launcherRadius - launcherPadding, style: .continuous)
-    }
 
     private var trimmedQuery: String {
         query.trimmingCharacters(in: .whitespaces)
     }
 
+    private var doOnboarding: Bool {
+        !onboarded
+    }
+
     private var dropdownVisible: Bool {
-        showDropdown && results.count > 1 && mode != .calc // If there is only one result what's the point of the dropdown
+        if doOnboarding { return showDropdown } // the tour opens the dropdown even though there's nothing to list
+        return showDropdown && results.count > 1 && mode != .calc // If there is only one result what's the point of the dropdown
     }
 
     // What the tile shows, idle shows nothing enter can't fire blind
+    // During the tour the tile also stays empty until you type, so a tour page never shows a random app
     private var paneItem: Item? {
         guard results.indices.contains(selection) else { return nil }
-        if mode == .find && query.isEmpty && !dropdownVisible { return nil }
+        if mode == .find && query.isEmpty && (!dropdownVisible || doOnboarding) { return nil }
         return results[selection]
     }
 
@@ -143,10 +238,11 @@ struct ContentView: View {
     var body: some View {
         keyHandled
             .onChange(of: query) { _, newValue in queryChanged(newValue) }
-            .onChange(of: mode) { refresh(); scheduleDropdown() }
+            .onChange(of: mode) { refresh(); scheduleDropdown(); if mode != .find { completeTask(.modeSwitch) } }
             .onChange(of: selection) { actionIndex = 0 }
             .onChange(of: dropdownVisible) { _, visible in revealRows(visible) }
             .onReceive(NotificationCenter.default.publisher(for: .rayReset)) { _ in reset() }
+            .onReceive(NotificationCenter.default.publisher(for: .rayFocus)) { _ in refocus() }
             .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { _ in
                 refocus()
             }
@@ -171,21 +267,54 @@ struct ContentView: View {
             .background { shortcutButtons }
     }
 
-    // This is the [name for top box] and dropdown
+    // This is the raydar, launchpad and map
     private var stage: some View {
-        // This is where the liquid happens. Cards closer than `spacing` melt into each other, so the dropdown
-        // starts fused with the launcher and pulls away until it's the 16pt gap apart. Keep spacing == the VStack gap
         GlassEffectContainer(spacing: 16) {
             VStack(spacing: 16) {
-                launcher
+                if showUtilityBar && isUpdateAvailable {
+                    utilityBar {
+                        HStack {
+//                            Image(systemName: "radar")
+                            Text("An update for ray is [available](https://github.com/dylankaru/ray/releases/latest).")
+                        }
+                        .font(.system(size: 13, weight: .medium))
+                    }
+                }
+                launcher // Launchpad
                 if dropdownVisible {
-                    dropdown
+                    dropdown // Map
                 }
             }
             .frame(width: 380, alignment: .top)
         }
         .animation(Self.dropdownSpring, value: dropdownVisible)
         .animation(.smooth(duration: 0.16), value: mode)
+        .task {
+                    isUpdateAvailable = await checkForUpdates()
+                }
+    }
+    
+    private func checkForUpdates() async -> Bool {
+        let status = await AppUpdateChecker.shared.checkAppUpdate()
+        
+        switch status {
+        case .upToDate:
+            return false
+        case .updateAvailable:
+            return true
+        }
+    }
+    
+    // Utility bar for minimalism sake will only be visible if it's needed, like when an app related notification is due
+    // like updates or other functionality like if its a friend's birthday or smth (for extensions ig)
+    @ViewBuilder
+    private func utilityBar<Content: View>(@ViewBuilder content: () -> Content) -> some View {
+        VStack(spacing: 0) {
+            content()
+        }
+        .frame(width: 380, height: 60)
+        .modifier(GlassCard(radius: dropdownRadius))
+        .glassEffectID("utilityBar", in: glassNS)
     }
 
     // For a user to choose different options in the dropdown
@@ -209,39 +338,105 @@ struct ContentView: View {
     }
 
     private var launcher: some View {
-        VStack(spacing: 0) {
-            tile
-            inputField
-        }
-        .padding(launcherPadding)
-        .frame(width: tileSize + launcherPadding * 2)
-        .modifier(GlassCard(radius: launcherRadius))
-        .glassEffectID("launcher", in: glassNS)
+        tile
+            .padding(launcherPadding)
+            .frame(width: tileSize + launcherPadding * 2, height: tileSize + launcherPadding * 2) // <-- Add height here
+            .modifier(GlassCard(radius: launcherRadius))
+            .glassEffectID("launcher", in: glassNS)
     }
 
     private var tile: some View {
         VStack(spacing: 12) {
-            paneIcon
-            paneTitle
+            if doOnboarding, let emoji = Onboarding.steps[onboardingStep].emoji {
+                OnboardingEmojiView(
+                    emoji: emoji,
+                    animation: Onboarding.steps[onboardingStep].animation
+                )
+            } else {
+                paneIcon
+                paneTitle
+            }
         }
         .padding(.horizontal, 16)
-        .padding(.top, 8)
-        .frame(width: tileSize, height: tileSize)
-        .overlay(alignment: .bottom) { actionChip.padding(.bottom, 14) }
+        .frame(width: tileSize, height: tileSize, alignment: .center)
+        .overlay(alignment: .bottom) { tileBottom } // an overlay never changes the tile's size
         .background(tileBackground)
     }
 
+    // Fill and outline share one radius, strokeBorder keeps the outline inside the shape
     private var tileBackground: some View {
-        ZStack {
-            tileShape.fill(selectionTint)
-            tileShape.strokeBorder(Color.accentColor.opacity(0.45), lineWidth: 0.6)
+        let shape = RoundedRectangle(cornerRadius: tileRadius, style: .continuous)
+
+        return ZStack {
+            shape.fill(selectionTint)
+            shape.strokeBorder(Color.accentColor.opacity(0.45), lineWidth: 0.6)
         }
     }
 
-    // In Calc mode the big thing is the answer instead of an icon
+    private var tileBottom: some View {
+        let typing: Bool = (mode != .find)
+
+        return VStack(spacing: typing ? 8 : 0) {
+            inputField
+            if !typing && !doOnboarding {
+                actionChip
+            }
+        }
+        .padding(.bottom, 14)
+    }
+
+    private struct WaveValues {
+        var rotation: Double = 0
+    }
+
+    struct OnboardingEmojiView: View {
+        let emoji: String
+        let animation: OnboardingEmojiAnimation?
+
+        @State private var isAnimating = false
+
+        var body: some View {
+            Group {
+                if case .wave = animation {
+                    Text(emoji)
+                        .font(.system(size: 80))
+                        .keyframeAnimator(
+                            initialValue: WaveValues(),
+                            repeating: true
+                        ) { content, value in
+                            content.rotationEffect(
+                                .degrees(value.rotation),
+                                anchor: UnitPoint(x: 1, y: 1)
+                            )
+                        } keyframes: { _ in
+                            KeyframeTrack(\.rotation) {
+                                // Gently lean back
+                                CubicKeyframe(-14, duration: 0.35)
+
+                                // Sweep forward
+                                CubicKeyframe(12, duration: 0.45)
+
+                                // A softer, smaller return swing
+                                CubicKeyframe(-7, duration: 0.35)
+
+                                // Ease back to neutral
+                                CubicKeyframe(0, duration: 0.4)
+
+                                // Pause before the next wave
+                                LinearKeyframe(0, duration: 1.0)
+                            }
+                        }
+
+                } else {
+                    // More animations go here if we ever need them
+                }
+            }
+        }
+    }
+
     @ViewBuilder
     private var paneIcon: some View {
-        if mode == .calc {
+        if mode == .calc { // The launchpad will show the answer instead of an app icon or anything like that
             Text(calcResult ?? "0")
                 .font(.system(size: 46, weight: .ultraLight, design: .rounded))
                 .monospacedDigit()
@@ -285,15 +480,15 @@ struct ContentView: View {
                 .font(.system(size: 14, weight: .medium))
                 .foregroundStyle(.secondary)
         } else if let item = paneItem {
-            Text(attributed(item.title))
+            highlighted(item.title)
                 .font(.system(size: 16, weight: .medium))
-//                .monospaced() // Optional, to be a setting
+//                .monospaced() // Optional, to be a setting maybe
                 .lineLimit(2)
                 .multilineTextAlignment(.center)
         } else {
             Text(query.isEmpty ? "Type to search" : "No matches")
                 .font(.system(size: 14))
-//                .monospaced() // Optional, to be a setting
+//                .monospaced() // Optional, to be a setting maybe
                 .foregroundStyle(.tertiary)
         }
     }
@@ -317,7 +512,6 @@ struct ContentView: View {
     }
 
     // Part of the aesthetic of ray is that it isn't visible so we take up less space
-    // The one exception is Calc and Note, there you need to see what you typed so it shows up under the tile
     private var inputField: some View {
         let visible: Bool = (mode != .find)
 
@@ -327,36 +521,252 @@ struct ContentView: View {
             .multilineTextAlignment(.center)
             .focused($focused)
             .onSubmit { run() }
-            .frame(height: visible ? 32 : 1)
-            .padding(.horizontal, 10)
-            .padding(.top, visible ? 10 : 0)
+            .padding(.horizontal, visible ? 12 : 0)
+            .frame(width: visible ? tileSize - 48 : 1, height: visible ? 30 : 1)
+            .background { if visible { Capsule().fill(Color.white.opacity(0.08)) } }
             .opacity(visible ? 1 : 0.01)
             .allowsHitTesting(visible)
     }
 
+    // The map
     private var dropdown: some View {
         VStack(spacing: 0) {
-            dropdownHeader
+            if doOnboarding {
+                onboardingContent
+            } else {
+                dropdownHeader
 
-            VStack(spacing: 1) {
-                ForEach(Array(results.enumerated()), id: \.element.id) { i, item in
-                    row(item, index: i)
-                        .opacity(rowsRevealed ? 1 : 0)
-                        .offset(y: rowsRevealed ? 0 : -8)
-                        .animation(Self.rowSpring.delay(0.08 + Double(i) * 0.03), value: rowsRevealed) // wait for the liquid to start forming, then each row lands a beat after the one above
+                VStack(spacing: 1) {
+                    ForEach(Array(results.enumerated()), id: \.element.id) { i, item in
+                        row(item, index: i)
+                            .opacity(rowsRevealed ? 1 : 0)
+                            .offset(y: rowsRevealed ? 0 : -8)
+                            .animation(Self.rowSpring.delay(0.08 + Double(i) * 0.03), value: rowsRevealed) // For stagger
+                    }
                 }
+                .padding(.horizontal, dropdownInset)
+                .padding(.bottom, dropdownInset)
+                .animation(Self.selectionSpring, value: selection)
             }
-            .padding(.horizontal, dropdownInset)
-            .padding(.bottom, dropdownInset)
-            .animation(Self.selectionSpring, value: selection)
         }
         .frame(width: 380)
         .modifier(GlassCard(radius: dropdownRadius))
         .glassEffectID("dropdown", in: glassNS)
     }
 
+    private var onboardingContent: some View {
+        let step: OnboardingStep = Onboarding.steps[min(onboardingStep, Onboarding.steps.count - 1)]
+        let last: Bool = onboardingStep >= Onboarding.steps.count - 1
+
+        return VStack(spacing: 0) {
+            ZStack {
+                onboardingPage(step)
+                    .id(onboardingStep)
+                    .transition(.opacity.combined(with: .offset(y: 10)))
+            }
+            .frame(maxWidth: .infinity, minHeight: 250)
+            .animation(Self.rowSpring, value: onboardingStep)
+
+            onboardingFooter(last: last)
+        }
+    }
+
+    private func onboardingPage(_ step: OnboardingStep) -> some View {
+        VStack(spacing: 10) {
+            onboardingIcon(step)
+
+            Text(step.title)
+                .font(.system(size: 18, weight: .semibold))
+
+            Text(step.body)
+                .font(.system(size: 13))
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+
+            if !step.keys.isEmpty {
+                HStack(spacing: 6) {
+                    ForEach(step.keys, id: \.self) { key in
+                        keycap(key)
+                    }
+                }
+                .padding(.top, 4)
+            }
+
+            if step.showsMarkerDemo {
+                markerDemo
+            }
+
+            if let hint = step.hint {
+                taskHint(hint)
+                    .padding(.bottom, 4)
+            }
+        }
+        .padding(.horizontal, 28)
+        .padding(.top, 8)
+    }
+
+    @ViewBuilder
+    private func onboardingIcon(_ step: OnboardingStep) -> some View {
+        if let symbol = step.symbol {
+            Image(systemName: symbol)
+                .font(.system(size: 45, weight: .light))
+                .foregroundStyle(.primary)
+        }
+    }
+
+    private func taskHint(_ hint: String) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: taskDone ? "checkmark.circle.fill" : "circle.dotted")
+                .foregroundStyle(taskDone ? Color.green : Color.secondary)
+                .contentTransition(.symbolEffect(.replace))
+            
+            Text(taskDone ? "Nice!" : hint)
+                .foregroundStyle(taskDone ? Color.primary : Color.secondary)
+        }
+        .font(.system(size: 12, weight: .medium))
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
+//        .background(
+//            Capsule()
+//                .fill(taskDone ? Color.green.opacity(0.12) : Color.secondary.opacity(0.08))
+//        )
+        .padding(.top, 8)
+        .id(taskDone)
+        .transition(.scale(scale: 0.92, anchor: .leading).combined(with: .opacity))
+        .animation(Self.rowSpring, value: taskDone)
+    }
+
+    private var markerDemo: some View {
+        let safText = Text("Saf").customAttribute(MarkedAttribute())
+
+        return HStack(spacing: 10) {
+            Text("saf")
+                .font(.system(size: 12, design: .monospaced))
+                .foregroundStyle(.secondary)
+            Image(systemName: "arrow.right")
+                .font(.system(size: 10))
+                .foregroundStyle(.tertiary)
+            
+            Text("\(safText)ari")
+                .textRenderer(MarkerRenderer(color: markerColor))
+                .font(.system(size: 16, weight: .medium))
+        }
+        .padding(.top, 6)
+    }
+
+    private func onboardingFooter(last: Bool) -> some View {
+        HStack {
+            Button { finishOnboarding() } label: {
+                HStack(spacing: 6) {
+                    keycap("esc")
+                    Text("Skip")
+                }
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.tertiary)
+
+            Spacer()
+
+            progressDots
+
+            Spacer()
+
+            Button { advanceOnboarding() } label: {
+                HStack(spacing: 6) {
+                    Text(last ? "Get started" : "Next")
+                    keycap("↵")
+                }
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+        }
+        .font(.system(size: 12))
+        .padding(.horizontal, 18)
+        .padding(.vertical, 12)
+        .overlay(alignment: .top) {
+            Rectangle().fill(Color.white.opacity(0.08)).frame(height: 0.5)
+        }
+    }
+
+    // The active page stretches into a pill, click a dot to jump to that page
+    private var progressDots: some View {
+        HStack(spacing: 5) {
+            ForEach(0..<Onboarding.steps.count, id: \.self) { i in
+                Capsule()
+                    .fill(Color.white.opacity(i == onboardingStep ? 0.85 : 0.25))
+                    .frame(width: i == onboardingStep ? 16 : 5, height: 5)
+                    .padding(.vertical, 6)
+                    .contentShape(Rectangle())
+                    .onTapGesture { goToStep(i) }
+            }
+        }
+        .animation(Self.rowSpring, value: onboardingStep)
+    }
+
+    private func advanceOnboarding() {
+        if onboardingStep >= Onboarding.steps.count - 1 {
+            finishOnboarding()
+        } else {
+            goToStep(onboardingStep + 1)
+        }
+    }
+
+    // Every page starts clean, so whatever you typed on the last page is gone
+    private func goToStep(_ i: Int) {
+        guard i >= 0, i < Onboarding.steps.count else { return }
+        taskDone = false
+        clearOnboardingInput()
+        onboardingStep = i
+    }
+
+    // Called from the real handlers (typing, Tab, arrows, ⌘1), so the keys genuinely work during the onboarding
+    // If this page was waiting for it, show the tick and move on after a beat
+    private func completeTask(_ kind: OnboardingTask) {
+        guard doOnboarding, !taskDone else { return }
+
+        let step = Onboarding.steps[
+            min(onboardingStep, Onboarding.steps.count - 1)
+        ]
+
+        guard step.tasks.contains(kind) else { return }
+
+        if kind == .typing {
+            guard trimmedQuery.lowercased().hasPrefix("saf") else {
+                return
+            }
+        }
+
+        taskDone = true
+        let page = onboardingStep
+
+        Task {
+            try? await Task.sleep(for: .seconds(0.9))
+            guard doOnboarding,
+                  taskDone,
+                  onboardingStep == page else { return }
+
+            advanceOnboarding()
+        }
+    }
+
+
+    private func clearOnboardingInput() {
+        if !query.isEmpty { query = "" }
+        if mode != .find { mode = .find }
+    }
+
+    // Marks the onboarding as seen and folds the dropdown away, after that it behaves normally
+    private func finishOnboarding() {
+        clearOnboardingInput()
+        taskDone = false
+        onboarded = true
+        onboardingStep = 0
+        closeDropdown()
+        scheduleDropdown()
+    }
+
     // Rows start hidden and are revealed right after the dropdown mounts so the stagger plays
-    // On close they reset instantly (no animation) so the next open starts clean
     private func revealRows(_ visible: Bool) {
         if visible {
             rowsRevealed = true
@@ -393,7 +803,7 @@ struct ContentView: View {
             rowIcon(item)
 
             VStack(alignment: .leading, spacing: 1) {
-                Text(attributed(item.title))
+                highlighted(item.title)
                     .font(.system(size: 14, weight: .medium))
                     .lineLimit(1)
                 rowSubtitle(item)
@@ -467,22 +877,48 @@ struct ContentView: View {
             .background(Color.white.opacity(0.09), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
     }
 
-    // Show the user what they are typing
-    private func attributed(_ title: String) -> AttributedString {
+    // Show the user what they are typing, matched letters get highlighted like with a marker
+    private func highlighted(_ title: String) -> some View {
+        markedText(title).textRenderer(MarkerRenderer(color: markerColor))
+    }
+
+    private func markedText(_ title: String) -> Text {
         let q: String = trimmedQuery
         let matched: Set<Int> = (mode == .find && !q.isEmpty) ? Highlight.matched(q, in: title) : []
+        guard !matched.isEmpty else { return Text(title) }
 
-        var out = AttributedString()
+        var attributedString = AttributedString()
+        var buffer = ""
+        var bufferMarked = false
+
         for (i, ch) in title.enumerated() {
-            var piece = AttributedString(String(ch))
-            if matched.contains(i) { piece.swiftUI.underlineStyle = .single }
-            out.append(piece)
+            let marked: Bool = matched.contains(i)
+            if i > 0 && marked != bufferMarked {
+                attributedString.append(makeAttributedString(buffer, marked: bufferMarked))
+                buffer = ""
+            }
+            buffer.append(ch)
+            bufferMarked = marked
         }
-        return out
+        attributedString.append(makeAttributedString(buffer, marked: bufferMarked))
+
+        return Text(attributedString)
+    }
+
+    private func makeAttributedString(_ text: String, marked: Bool) -> AttributedString {
+        var attrStr = AttributedString(text)
+        if marked {
+            attrStr.font = .body.bold()
+            attrStr.foregroundColor = .accentColor
+        }
+        return attrStr
+    }
+
+    private func segment(_ text: String, marked: Bool) -> Text {
+        marked ? Text(text).customAttribute(MarkedAttribute()) : Text(text)
     }
 
     // What the chip offers depends on what the item is
-    // Calc copies, Note saves, web searches, apps and files get Open / Reveal / Copy Path
     private func actions(for item: Item) -> [PaneAction] {
         if mode == .calc {
             return [PaneAction(title: "Copy", icon: "doc.on.doc", run: item.action)]
@@ -517,9 +953,10 @@ struct ContentView: View {
 
     // Hides the dropdown and reopens it after an idle delay (pulled from UserDefaults)
     private func scheduleDropdown() {
+        if doOnboarding && showDropdown { return } // the onboarding stays put while you try things
         dropdownTask?.cancel()
         showDropdown = false
-        let delay: Double = query.isEmpty ? Self.stillDelay : Self.typingDelay
+        let delay: Double = doOnboarding ? 0.5 : (query.isEmpty ? Self.stillDelay : Self.typingDelay)
         dropdownTask = Task {
             try? await Task.sleep(for: .seconds(delay))
             guard !Task.isCancelled else { return }
@@ -541,9 +978,11 @@ struct ContentView: View {
         }
         refresh()
         scheduleDropdown()
+        if !q.isEmpty { completeTask(.typing) }
     }
 
     private func handleDown() -> KeyPress.Result {
+        completeTask(.arrows)
         if !dropdownVisible && results.count > 1 && mode != .calc {
             dropdownTask?.cancel()
             showDropdown = true
@@ -554,6 +993,10 @@ struct ContentView: View {
     }
 
     private func handleEscape() -> KeyPress.Result {
+        if doOnboarding { // esc skips the tour instead of closing Ray
+            finishOnboarding()
+            return .handled
+        }
         if dropdownVisible {
             closeDropdown()
         } else {
@@ -591,6 +1034,10 @@ struct ContentView: View {
     }
 
     private func move(_ d: Int) {
+        if doOnboarding { // arrows still work, during the tour they count towards the "pick your result" page
+            completeTask(.arrows)
+            return
+        }
         guard !results.isEmpty else { return }
         selection = max(0, min(results.count - 1, selection + d))
     }
@@ -607,8 +1054,15 @@ struct ContentView: View {
                 NSWorkspace.shared.openApplication(at: url, configuration: NSWorkspace.OpenConfiguration())
             })
         }
-        pool = items
+        pool = items + [settingsItem]
         refresh()
+    }
+
+    // Not an app, but it lives in the same search so typing "settings" finds it
+    private var settingsItem: Item {
+        Item(id: "cmd:settings", title: "Ray Settings", icon: "gearshape", subtitle: "Command") {
+            AppDelegate.openSettings()
+        }
     }
 
     // Our own file index, rebuilt every 5 minutes in the background instead of using Spotlight (way faster)
@@ -721,12 +1175,20 @@ struct ContentView: View {
     }
 
     private func run(at i: Int) {
+        if doOnboarding {
+            completeTask(.number)
+            return
+        }
         guard results.indices.contains(i) else { return }
         selection = i
         run()
     }
 
     private func run() {
+        if doOnboarding {
+            advanceOnboarding()
+            return
+        }
         guard results.indices.contains(selection) else { return }
         if mode == .find && query.isEmpty && !dropdownVisible { return }
         let chosen: PaneAction? = currentAction
@@ -735,7 +1197,7 @@ struct ContentView: View {
     }
 
     private func hide() {
-        NSApp.windows.first { $0 is LauncherPanel }?.orderOut(nil)
+        AppDelegate.dismiss()
     }
 
     // Always open and close empty
@@ -763,3 +1225,4 @@ struct ContentView: View {
         DispatchQueue.main.async { focused = true }
     }
 }
+

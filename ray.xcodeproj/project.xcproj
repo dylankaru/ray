@@ -68,6 +68,8 @@
         "ENABLE_RESOURCE_ACCESS_PHOTO_LIBRARY": "NO",
         "GENERATE_INFOPLIST_FILE": "YES",
         "INFOPLIST_FILE": "ray/Info.plist",
+        "INFOPLIST_KEY_CFBundleDisplayName": "ray",
+        "INFOPLIST_KEY_LSApplicationCategoryType": "public.app-category.productivity",
         "INFOPLIST_KEY_LSUIElement": "NO",
         "INFOPLIST_KEY_NSCameraUsageDescription": "Ray uses your camera to show your camera when you want to see your camera",
         "INFOPLIST_KEY_NSHumanReadableCopyright": "",

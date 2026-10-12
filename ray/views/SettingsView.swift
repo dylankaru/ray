@@ -63,13 +63,13 @@ struct SettingsView: View {
     }
 }
 
-// MARK: - General
-
-// These keys are the same ones ContentView reads, so moving a slider changes the dropdown timing straight away
 struct GeneralSettings: View {
+    
+    // Defaults
     @AppStorage("ray_typing_delay") private var typingDelay: Double = 0.8
     @AppStorage("ray_still_delay") private var stillDelay: Double = 3.0
     @AppStorage("ray_onboarded") private var onboarded: Bool = false
+    @AppStorage("ray_marker_theme") private var markerTheme: MarkerTheme = .highlighter
 
     var body: some View {
         Form {
@@ -77,7 +77,7 @@ struct GeneralSettings: View {
                 delayRow("While typing", value: $typingDelay, range: 0.2...2.0)
                 delayRow("Nothing typed", value: $stillDelay, range: 0.5...8.0)
             }
-
+            
             Section {
                 Button("Replay the welcome tour") {
                     onboarded = false
@@ -87,6 +87,14 @@ struct GeneralSettings: View {
                     stillDelay = 3.0
                 }
             }
+            
+            Picker("Marker Style", selection: $markerTheme) {
+                ForEach(MarkerTheme.allCases, id: \.self) { theme in
+                    Text(theme.title).tag(theme)
+                }
+            }
+            .pickerStyle(.segmented)
+            
         }
         .formStyle(.grouped)
     }
@@ -104,8 +112,6 @@ struct GeneralSettings: View {
         }
     }
 }
-
-// MARK: - Hotkeys
 
 struct HotkeySettings: View {
     var body: some View {

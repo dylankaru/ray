@@ -16,9 +16,11 @@ extension Notification.Name {
 }
 
 final class LauncherPanel: NSPanel {
+    static let size = NSSize(width: 520, height: 900)
+
     init<V: View>(rootView: V) {
         super.init(
-            contentRect: NSRect(x: 0, y: 0, width: 520, height: 900),
+            contentRect: NSRect(origin: .zero, size: Self.size),
             styleMask: [.borderless, .nonactivatingPanel, .fullSizeContentView],
             backing: .buffered,
             defer: false
@@ -30,41 +32,45 @@ final class LauncherPanel: NSPanel {
         hasShadow = false
         animationBehavior = .none
         collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+
         let hosting = NSHostingView(rootView: rootView)
-        hosting.sizingOptions = []
+        hosting.sizingOptions = [] // the hosting view never drives the window size
         contentView = hosting
+
+        contentMinSize = Self.size
+        contentMaxSize = Self.size
     }
-    
+
     override var canBecomeKey: Bool { true }
-    
+
+    /// In app mode the launcher stays up when you click away.
     var pinned = false
-    
+
     override func resignKey() {        // click away = hide
         super.resignKey()
         if !pinned { orderOut(nil) }
     }
-    
+
     override func orderOut(_ sender: Any?) {
         super.orderOut(sender)
         NotificationCenter.default.post(name: .rayReset, object: nil)
     }
-    
-    func positionOnActiveScreen() {
-        let screen = NSScreen.main ?? NSScreen.screens[0]
-        let f = screen.visibleFrame
-        
-        let x = f.midX - (frame.width / 2)
-        let y = f.midY - (frame.height / 2)
-        
-        setFrameOrigin(NSPoint(x: x, y: y))
-    }
-    
+
+    // The system is not allowed to nudge the panel back onto the screen
     override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect {
         frameRect
     }
-    
-    override func setFrame(_ frameRect: NSRect, display flag: Bool) {
-        print("frame ->", frameRect)
-        super.setFrame(frameRect, display: flag)
+
+    func positionOnActiveScreen() {
+        let screen = NSScreen.main ?? NSScreen.screens[0]
+        let f = screen.visibleFrame
+        let size = Self.size
+
+        // The content is top-aligned, so anchor the window by its top edge
+        // This is the same top edge a centered 800pt window had, so the launchpad sits where it always did
+        let top = min(f.midY + 400, f.maxY)
+        let origin = NSPoint(x: f.midX - size.width / 2, y: top - size.height)
+
+        setFrame(NSRect(origin: origin, size: size), display: false)
     }
 }

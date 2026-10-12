@@ -114,7 +114,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NSApp.setActivationPolicy(.accessory)
             DispatchQueue.main.async {
                 NSApp.setActivationPolicy(.regular)
-                done()
             }
         }
     }
@@ -156,7 +155,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func openFromMenu() {
-        // after the menu has closed, otherwise it steals key straight back
         DispatchQueue.main.async { [weak self] in self?.showTransient() }
     }
 

@@ -25,3 +25,4 @@ struct rayApp: App {
 // TODO: make the dropdown more customisable or add a mini dashboard
 // TODO: --> as in make it so that they can get quick stats to glance like maybe a friends birthday is tday or smth
 // TODO: improve performance (90mb of ram is a lot, and 7% cpu)
+// TODO: fix the search? its so slow compared to before idek whats happened like why TF is it saying searching?? that didnt happen before

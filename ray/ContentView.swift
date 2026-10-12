@@ -48,19 +48,12 @@ struct PaneAction {
     let run: () -> Void
 }
 
-// TODO: Change, i really dont like this logo thing
-struct RayMark: Shape {
-    func path(in r: CGRect) -> Path {
-        let s: CGFloat = min(r.width, r.height)
-        var p = Path()
-        p.move(to: CGPoint(x: r.minX + 0.12 * s, y: r.maxY - 0.12 * s))
-        p.addLine(to: CGPoint(x: r.minX + 0.88 * s, y: r.minY + 0.12 * s))
-        p.move(to: CGPoint(x: r.minX + 0.04 * s, y: r.maxY - 0.50 * s))
-        p.addLine(to: CGPoint(x: r.minX + 0.50 * s, y: r.minY + 0.04 * s))
-        p.move(to: CGPoint(x: r.minX + 0.50 * s, y: r.maxY - 0.04 * s))
-        p.addLine(to: CGPoint(x: r.minX + 0.96 * s, y: r.minY + 0.50 * s))
-        return p
-    }
+/// SideAction is what the left and right arrows (and the swipes) do on a row
+/// It closes the launcher itself when it wants to, because Open With needs the launcher to stay up
+struct SideAction {
+    let title: String
+    let icon: String
+    let run: () -> Void
 }
 
 // Different types of animations for the emoji that lives in the launchpad
@@ -73,9 +66,8 @@ enum OnboardingTask {
     case typing, modeSwitch, arrows, number
 }
 
-/// One page of the first-run onbarding that lives in the dropdown
-/// Give it either an emoji or an SF Symbol, keys are shown as keycaps under the text
-/// If it has tasks, the page waits for you to do one of them (with the real keys) and then moves on by itself
+// One page of the first-run onbarding that lives in the dropdown
+// Give it either an emoji or an SF Symbol, keys are shown as keycaps under the text
 struct OnboardingStep {
     var emoji: String? = nil
     var animation: OnboardingEmojiAnimation? = nil
@@ -89,7 +81,6 @@ struct OnboardingStep {
 }
 
 enum Onboarding {
-    // Add, remove or reorder pages here, everything else adapts to the count
     static let steps: [OnboardingStep] = [
         OnboardingStep(emoji: "👋",
                        animation: OnboardingEmojiAnimation.wave,
@@ -124,11 +115,9 @@ enum Onboarding {
     ]
 }
 
-// Marks a piece of text as highlighted, the renderer below looks for it
+// Marks a piece of text as typed
 struct MarkedAttribute: TextAttribute {}
 
-// Draws the marker pen. Every run of text tagged with MarkedAttribute gets one square yellow bar behind it
-// Letters that touch are grouped into a single run first, so they fuse into one highlight instead of separate boxes
 struct MarkerRenderer: TextRenderer {
     var color: Color
 
@@ -136,9 +125,9 @@ struct MarkerRenderer: TextRenderer {
         for line in layout {
             for run in line where run[MarkedAttribute.self] != nil {
                 let r = run.typographicBounds.rect.insetBy(dx: 0, dy: 1) // dx 0 so it never spills onto the next letter
-                context.fill(Path(r), with: .color(color)) // square, like a real marker
+                context.fill(Path(r), with: .color(color))
             }
-            context.draw(line) // text goes on top of the marker
+            context.draw(line)
         }
     }
 }
@@ -160,17 +149,18 @@ struct GlassCard: ViewModifier {
 
 // 🫠
 struct ContentView: View {
-
+    
     // The feel of the map
     private static let dropdownSpring = Animation.spring(response: 0.42, dampingFraction: 0.72)
     private static let rowSpring = Animation.spring(response: 0.32, dampingFraction: 0.78)
     private static let selectionSpring = Animation.spring(response: 0.28, dampingFraction: 0.78)
-
+    
     // Defaults
     @AppStorage("ray_typing_delay") private static var typingDelay: Double = 0.8
     @AppStorage("ray_still_delay") private static var stillDelay: Double = 3.0
     @AppStorage("ray_onboarded") private var onboarded: Bool = false // Onboarding related
-
+    @AppStorage("ray_marker_theme") private var markerTheme: MarkerTheme = .highlighter
+    
     @State private var query: String = ""
     @State private var mode: Mode = .find
     @State private var selection: Int = 0
@@ -179,7 +169,10 @@ struct ContentView: View {
     @State private var onboardingStep: Int = 0 // Onboarding related
     @State private var taskDone: Bool = false  // Onboarding related
     @State private var calcResult: String? = nil
-    @State private var fileEntries: [FileEntry] = []
+    @State private var fileIndex = FileIndex() // The flat file index, see Item.swift
+    @State private var fileSearchTask: Task<(entries: [FileEntry], took: Duration), Never>? = nil // The file search in flight, cancelled when you type again
+    @State private var filesPending: Bool = false // True while a file search is running, so the web fallback isn't shown as if it were the answer
+    @State private var lastFileSearch: Duration = .milliseconds(100) // How long the last file search took, fast ones run inline
     @State private var fileHits: [Item] = []
     @State private var showDropdown: Bool = false
     @State private var rowsRevealed: Bool = false
@@ -188,10 +181,11 @@ struct ContentView: View {
     @State private var lastMouseLocation: CGPoint = .zero
     @State private var showUtilityBar: Bool = true
     @State private var isUpdateAvailable = false
+    @State private var runningPaths: Set<String> = [] // Apps that are running right now, refreshed whenever the launcher opens
     @FocusState private var focused: Bool
     @Namespace private var ns
     @Namespace private var glassNS
-
+    
     private let tileSize: CGFloat = 240
     private let rowHeight: CGFloat = 46
     private let launcherRadius: CGFloat = 50
@@ -199,42 +193,43 @@ struct ContentView: View {
     private let tileRadius: CGFloat = 38
     private let dropdownRadius: CGFloat = 28
     private let dropdownInset: CGFloat = 8
+    private let dropdownHeaderHeight: CGFloat = 36 // Roughly the height of "Suggestions", only used to place the Open With menu
     private let selectionTint = Color.gray.opacity(0.3)
-    private let markerColor = Color.yellow.opacity(0.62)
-
-
+    private let markerColour = Color.yellow.opacity(0.62)
+    
     private var trimmedQuery: String {
         query.trimmingCharacters(in: .whitespaces)
     }
-
+    
     private var doOnboarding: Bool {
         !onboarded
     }
-
+    
     private var dropdownVisible: Bool {
         if doOnboarding { return showDropdown } // the tour opens the dropdown even though there's nothing to list
         return showDropdown && results.count > 1 && mode != .calc // If there is only one result what's the point of the dropdown
     }
-
+    
     // What the tile shows, idle shows nothing enter can't fire blind
     // During the tour the tile also stays empty until you type, so a tour page never shows a random app
     private var paneItem: Item? {
         guard results.indices.contains(selection) else { return nil }
         if mode == .find && query.isEmpty && (!dropdownVisible || doOnboarding) { return nil }
+        if filesPending && results[selection].id.hasPrefix("web:") { return nil } // files are on their way, don't flash the web search
         return results[selection]
     }
-
+    
     private var currentActions: [PaneAction] {
         guard let item = paneItem else { return [] }
         return actions(for: item)
     }
-
+    
     private var currentAction: PaneAction? {
         let acts: [PaneAction] = currentActions
         guard !acts.isEmpty else { return nil }
         return acts[min(actionIndex, acts.count - 1)]
     }
-
+    
     var body: some View {
         keyHandled
             .onChange(of: query) { _, newValue in queryChanged(newValue) }
@@ -250,23 +245,25 @@ struct ContentView: View {
             .task { await indexFiles() }
             .onAppear { focused = true; refresh(); scheduleDropdown() }
     }
-
+    
     private var keyHandled: some View {
         framed
             .onKeyPress(.downArrow) { handleDown() }
             .onKeyPress(.upArrow)   { move(-1); return .handled }
+            .onKeyPress(.leftArrow)  { handleSide(.leading) }  // ← Reveal in Finder
+            .onKeyPress(.rightArrow) { handleSide(.trailing) } // → Open With (files) or Quit (apps)
             .onKeyPress(.escape)    { handleEscape() }
             .onKeyPress(.tab, phases: .down) { press in handleTab(press) } // Tab swaps between Find, Calc and Note
             .onKeyPress(.delete)    { handleDelete() }
     }
-
+    
     private var framed: some View {
         stage
             .padding(60)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             .background { shortcutButtons }
     }
-
+    
     // This is the raydar, launchpad and map
     private var stage: some View {
         GlassEffectContainer(spacing: 16) {
@@ -274,7 +271,7 @@ struct ContentView: View {
                 if showUtilityBar && isUpdateAvailable {
                     utilityBar {
                         HStack {
-//                            Image(systemName: "radar")
+                            //                            Image(systemName: "radar")
                             Text("An update for ray is [available](https://github.com/dylankaru/ray/releases/latest).")
                         }
                         .font(.system(size: 13, weight: .medium))
@@ -290,8 +287,8 @@ struct ContentView: View {
         .animation(Self.dropdownSpring, value: dropdownVisible)
         .animation(.smooth(duration: 0.16), value: mode)
         .task {
-                    isUpdateAvailable = await checkForUpdates()
-                }
+            isUpdateAvailable = await checkForUpdates()
+        }
     }
     
     private func checkForUpdates() async -> Bool {
@@ -316,7 +313,7 @@ struct ContentView: View {
         .modifier(GlassCard(radius: dropdownRadius))
         .glassEffectID("utilityBar", in: glassNS)
     }
-
+    
     // For a user to choose different options in the dropdown
     private var shortcutButtons: some View {
         Group {
@@ -330,13 +327,13 @@ struct ContentView: View {
         .opacity(0)
         .frame(width: 0, height: 0)
     }
-
+    
     private func shortcutKey(_ i: Int) -> KeyEquivalent {
         let digit: String = String(i + 1)
         let ch: Character = digit.first ?? "1"
         return KeyEquivalent(ch)
     }
-
+    
     private var launcher: some View {
         tile
             .padding(launcherPadding)
@@ -344,7 +341,7 @@ struct ContentView: View {
             .modifier(GlassCard(radius: launcherRadius))
             .glassEffectID("launcher", in: glassNS)
     }
-
+    
     private var tile: some View {
         VStack(spacing: 12) {
             if doOnboarding, let emoji = Onboarding.steps[onboardingStep].emoji {
@@ -362,20 +359,20 @@ struct ContentView: View {
         .overlay(alignment: .bottom) { tileBottom } // an overlay never changes the tile's size
         .background(tileBackground)
     }
-
+    
     // Fill and outline share one radius, strokeBorder keeps the outline inside the shape
     private var tileBackground: some View {
         let shape = RoundedRectangle(cornerRadius: tileRadius, style: .continuous)
-
+        
         return ZStack {
             shape.fill(selectionTint)
             shape.strokeBorder(Color.accentColor.opacity(0.45), lineWidth: 0.6)
         }
     }
-
+    
     private var tileBottom: some View {
         let typing: Bool = (mode != .find)
-
+        
         return VStack(spacing: typing ? 8 : 0) {
             inputField
             if !typing && !doOnboarding {
@@ -384,17 +381,17 @@ struct ContentView: View {
         }
         .padding(.bottom, 14)
     }
-
+    
     private struct WaveValues {
         var rotation: Double = 0
     }
-
+    
     struct OnboardingEmojiView: View {
         let emoji: String
         let animation: OnboardingEmojiAnimation?
-
+        
         @State private var isAnimating = false
-
+        
         var body: some View {
             Group {
                 if case .wave = animation {
@@ -412,28 +409,28 @@ struct ContentView: View {
                             KeyframeTrack(\.rotation) {
                                 // Gently lean back
                                 CubicKeyframe(-14, duration: 0.35)
-
+                                
                                 // Sweep forward
                                 CubicKeyframe(12, duration: 0.45)
-
+                                
                                 // A softer, smaller return swing
                                 CubicKeyframe(-7, duration: 0.35)
-
+                                
                                 // Ease back to neutral
                                 CubicKeyframe(0, duration: 0.4)
-
+                                
                                 // Pause before the next wave
                                 LinearKeyframe(0, duration: 1.0)
                             }
                         }
-
+                    
                 } else {
                     // More animations go here if we ever need them
                 }
             }
         }
     }
-
+    
     @ViewBuilder
     private var paneIcon: some View {
         if mode == .calc { // The launchpad will show the answer instead of an app icon or anything like that
@@ -449,18 +446,18 @@ struct ContentView: View {
         } else if let item = paneItem {
             bigIcon(item)
         } else {
-            RayMark()
-                .stroke(Color.secondary.opacity(0.6), style: StrokeStyle(lineWidth: 2.4, lineCap: .round))
-                .frame(width: 42, height: 42)
+            Image("ray")
+                .font(.system(size: 46))
+                .foregroundStyle(.background)
                 .frame(height: 84)
         }
     }
-
+    
     // Apps and files get their real icon, everything else (web, notes) gets a symbol
     @ViewBuilder
     private func bigIcon(_ item: Item) -> some View {
         if let path = item.iconPath {
-            Image(nsImage: NSWorkspace.shared.icon(forFile: path))
+            Image(nsImage: IconCache.icon(for: path))
                 .resizable()
                 .interpolation(.high)
                 .frame(width: 80, height: 80)
@@ -472,7 +469,7 @@ struct ContentView: View {
                 .frame(height: 84)
         }
     }
-
+    
     @ViewBuilder
     private var paneTitle: some View {
         if mode == .calc {
@@ -482,21 +479,21 @@ struct ContentView: View {
         } else if let item = paneItem {
             highlighted(item.title)
                 .font(.system(size: 16, weight: .medium))
-//                .monospaced() // Optional, to be a setting maybe
+            //                .monospaced() // Optional, to be a setting maybe
                 .lineLimit(2)
                 .multilineTextAlignment(.center)
         } else {
-            Text(query.isEmpty ? "Type to search" : "No matches")
+            Text(query.isEmpty ? "Type to search" : (filesPending ? "Searching…" : "No matches"))
                 .font(.system(size: 14))
-//                .monospaced() // Optional, to be a setting maybe
+            //                .monospaced() // Optional, to be a setting maybe
                 .foregroundStyle(.tertiary)
         }
     }
-
+    
     // Tooltip to run the action
     private var actionChip: some View {
         let dim: Bool = (currentAction == nil)
-
+        
         return HStack(spacing: 6) {
             Image(systemName: currentAction?.icon ?? "arrowshape.turn.up.right")
                 .font(.system(size: 11, weight: .medium))
@@ -510,11 +507,11 @@ struct ContentView: View {
         .contentShape(Capsule())
         .onTapGesture { cycleAction(1); focused = true }
     }
-
+    
     // Part of the aesthetic of ray is that it isn't visible so we take up less space
     private var inputField: some View {
         let visible: Bool = (mode != .find)
-
+        
         return TextField(mode.prompt, text: $query)
             .textFieldStyle(.plain)
             .font(.system(size: 13.5))
@@ -527,7 +524,7 @@ struct ContentView: View {
             .opacity(visible ? 1 : 0.01)
             .allowsHitTesting(visible)
     }
-
+    
     // The map
     private var dropdown: some View {
         VStack(spacing: 0) {
@@ -535,29 +532,33 @@ struct ContentView: View {
                 onboardingContent
             } else {
                 dropdownHeader
-
+                
                 VStack(spacing: 1) {
                     ForEach(Array(results.enumerated()), id: \.element.id) { i, item in
                         row(item, index: i)
                             .opacity(rowsRevealed ? 1 : 0)
                             .offset(y: rowsRevealed ? 0 : -8)
-                            .animation(Self.rowSpring.delay(0.08 + Double(i) * 0.03), value: rowsRevealed) // For stagger
+                            .animation(Self.rowSpring.delay(0.25 + Double(i) * 0.03), value: rowsRevealed) // For stagger
+                            // Swipe left reveals the trailing action (same as →), swipe right the leading one (same as ←)
+                            .swipeActions(edge: .trailing, allowsFullSwipe: !isApp(item)) { swipeButton(.trailing, item: item, index: i) }
+                            .swipeActions(edge: .leading, allowsFullSwipe: true) { swipeButton(.leading, item: item, index: i) }
                     }
                 }
                 .padding(.horizontal, dropdownInset)
                 .padding(.bottom, dropdownInset)
                 .animation(Self.selectionSpring, value: selection)
+                .clipped()
             }
         }
         .frame(width: 380)
         .modifier(GlassCard(radius: dropdownRadius))
         .glassEffectID("dropdown", in: glassNS)
     }
-
+    
     private var onboardingContent: some View {
         let step: OnboardingStep = Onboarding.steps[min(onboardingStep, Onboarding.steps.count - 1)]
         let last: Bool = onboardingStep >= Onboarding.steps.count - 1
-
+        
         return VStack(spacing: 0) {
             ZStack {
                 onboardingPage(step)
@@ -566,24 +567,24 @@ struct ContentView: View {
             }
             .frame(maxWidth: .infinity, minHeight: 250)
             .animation(Self.rowSpring, value: onboardingStep)
-
+            
             onboardingFooter(last: last)
         }
     }
-
+    
     private func onboardingPage(_ step: OnboardingStep) -> some View {
         VStack(spacing: 10) {
             onboardingIcon(step)
-
+            
             Text(step.title)
                 .font(.system(size: 18, weight: .semibold))
-
+            
             Text(step.body)
                 .font(.system(size: 13))
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .fixedSize(horizontal: false, vertical: true)
-
+            
             if !step.keys.isEmpty {
                 HStack(spacing: 6) {
                     ForEach(step.keys, id: \.self) { key in
@@ -592,11 +593,11 @@ struct ContentView: View {
                 }
                 .padding(.top, 4)
             }
-
+            
             if step.showsMarkerDemo {
                 markerDemo
             }
-
+            
             if let hint = step.hint {
                 taskHint(hint)
                     .padding(.bottom, 4)
@@ -605,7 +606,7 @@ struct ContentView: View {
         .padding(.horizontal, 28)
         .padding(.top, 8)
     }
-
+    
     @ViewBuilder
     private func onboardingIcon(_ step: OnboardingStep) -> some View {
         if let symbol = step.symbol {
@@ -614,7 +615,7 @@ struct ContentView: View {
                 .foregroundStyle(.primary)
         }
     }
-
+    
     private func taskHint(_ hint: String) -> some View {
         HStack(spacing: 6) {
             Image(systemName: taskDone ? "checkmark.circle.fill" : "circle.dotted")
@@ -627,34 +628,32 @@ struct ContentView: View {
         .font(.system(size: 12, weight: .medium))
         .padding(.horizontal, 10)
         .padding(.vertical, 5)
-//        .background(
-//            Capsule()
-//                .fill(taskDone ? Color.green.opacity(0.12) : Color.secondary.opacity(0.08))
-//        )
+        //        .background(
+        //            Capsule()
+        //                .fill(taskDone ? Color.green.opacity(0.12) : Color.secondary.opacity(0.08))
+        //        )
         .padding(.top, 8)
         .id(taskDone)
         .transition(.scale(scale: 0.92, anchor: .leading).combined(with: .opacity))
         .animation(Self.rowSpring, value: taskDone)
     }
-
+    
+    // Shows the marker highlight with the real renderer, "saf" lighting up the start of Safari
     private var markerDemo: some View {
-        let safText = Text("Saf").customAttribute(MarkedAttribute())
-
-        return HStack(spacing: 10) {
+        HStack(spacing: 10) {
             Text("saf")
                 .font(.system(size: 12, design: .monospaced))
                 .foregroundStyle(.secondary)
             Image(systemName: "arrow.right")
                 .font(.system(size: 10))
                 .foregroundStyle(.tertiary)
-            
-            Text("\(safText)ari")
-                .textRenderer(MarkerRenderer(color: markerColor))
+            (Text("Saf").customAttribute(MarkedAttribute()) + Text("ari"))
+                .textRenderer(MarkerRenderer(color: markerColour))
                 .font(.system(size: 16, weight: .medium))
         }
         .padding(.top, 6)
     }
-
+    
     private func onboardingFooter(last: Bool) -> some View {
         HStack {
             Button { finishOnboarding() } label: {
@@ -665,13 +664,13 @@ struct ContentView: View {
             }
             .buttonStyle(.plain)
             .foregroundStyle(.tertiary)
-
+            
             Spacer()
-
+            
             progressDots
-
+            
             Spacer()
-
+            
             Button { advanceOnboarding() } label: {
                 HStack(spacing: 6) {
                     Text(last ? "Get started" : "Next")
@@ -688,7 +687,7 @@ struct ContentView: View {
             Rectangle().fill(Color.white.opacity(0.08)).frame(height: 0.5)
         }
     }
-
+    
     // The active page stretches into a pill, click a dot to jump to that page
     private var progressDots: some View {
         HStack(spacing: 5) {
@@ -703,7 +702,7 @@ struct ContentView: View {
         }
         .animation(Self.rowSpring, value: onboardingStep)
     }
-
+    
     private func advanceOnboarding() {
         if onboardingStep >= Onboarding.steps.count - 1 {
             finishOnboarding()
@@ -711,7 +710,7 @@ struct ContentView: View {
             goToStep(onboardingStep + 1)
         }
     }
-
+    
     // Every page starts clean, so whatever you typed on the last page is gone
     private func goToStep(_ i: Int) {
         guard i >= 0, i < Onboarding.steps.count else { return }
@@ -719,43 +718,43 @@ struct ContentView: View {
         clearOnboardingInput()
         onboardingStep = i
     }
-
+    
     // Called from the real handlers (typing, Tab, arrows, ⌘1), so the keys genuinely work during the onboarding
     // If this page was waiting for it, show the tick and move on after a beat
     private func completeTask(_ kind: OnboardingTask) {
         guard doOnboarding, !taskDone else { return }
-
+        
         let step = Onboarding.steps[
             min(onboardingStep, Onboarding.steps.count - 1)
         ]
-
+        
         guard step.tasks.contains(kind) else { return }
-
+        
         if kind == .typing {
             guard trimmedQuery.lowercased().hasPrefix("saf") else {
                 return
             }
         }
-
+        
         taskDone = true
         let page = onboardingStep
-
+        
         Task {
             try? await Task.sleep(for: .seconds(0.9))
             guard doOnboarding,
                   taskDone,
                   onboardingStep == page else { return }
-
+            
             advanceOnboarding()
         }
     }
-
-
+    
+    
     private func clearOnboardingInput() {
         if !query.isEmpty { query = "" }
         if mode != .find { mode = .find }
     }
-
+    
     // Marks the onboarding as seen and folds the dropdown away, after that it behaves normally
     private func finishOnboarding() {
         clearOnboardingInput()
@@ -765,7 +764,7 @@ struct ContentView: View {
         closeDropdown()
         scheduleDropdown()
     }
-
+    
     // Rows start hidden and are revealed right after the dropdown mounts so the stagger plays
     private func revealRows(_ visible: Bool) {
         if visible {
@@ -776,7 +775,7 @@ struct ContentView: View {
             withTransaction(t) { rowsRevealed = false }
         }
     }
-
+    
     private var dropdownHeader: some View {
         HStack(spacing: 6) {
             Text(query.isEmpty ? "Suggestions" : "\(results.count) results")
@@ -795,23 +794,23 @@ struct ContentView: View {
         .padding(.top, 14)
         .padding(.bottom, 8)
     }
-
+    
     private func row(_ item: Item, index i: Int) -> some View {
         let selected: Bool = (i == selection)
-
+        
         return HStack(spacing: 12) {
             rowIcon(item)
-
+            
             VStack(alignment: .leading, spacing: 1) {
                 highlighted(item.title)
                     .font(.system(size: 14, weight: .medium))
                     .lineLimit(1)
                 rowSubtitle(item)
             }
-
+            
             Spacer(minLength: 8)
-
-            rowTrailing(selected: selected, index: i)
+            
+            rowTrailing(item, selected: selected, index: i)
         }
         .padding(.horizontal, 12)
         .frame(height: rowHeight)
@@ -820,11 +819,11 @@ struct ContentView: View {
         .onTapGesture { selection = i; run() }
         .onHover { hovering in hover(hovering, index: i) }
     }
-
+    
     @ViewBuilder
     private func rowIcon(_ item: Item) -> some View {
         if let path = item.iconPath {
-            Image(nsImage: NSWorkspace.shared.icon(forFile: path))
+            Image(nsImage: IconCache.icon(for: path))
                 .resizable()
                 .interpolation(.high)
                 .frame(width: 28, height: 28)
@@ -835,7 +834,7 @@ struct ContentView: View {
                 .frame(width: 28, height: 28)
         }
     }
-
+    
     // Apps show their path, files show the folder they're in
     @ViewBuilder
     private func rowSubtitle(_ item: Item) -> some View {
@@ -847,18 +846,23 @@ struct ContentView: View {
                 .truncationMode(.middle)
         }
     }
-
+    
     @ViewBuilder
-    private func rowTrailing(selected: Bool, index i: Int) -> some View {
+    private func rowTrailing(_ item: Item, selected: Bool, index i: Int) -> some View {
         if selected {
-            keycap("↵")
+            HStack(spacing: 4) {
+                // The side actions only show up on the selected row, so there's a hint that the arrows do something
+                if let a = sideAction(.leading, for: item, at: i) { sideHint("←", a) }
+                if let a = sideAction(.trailing, for: item, at: i) { sideHint("→", a) }
+                keycap("↵")
+            }
         } else {
             Text("⌘\(i + 1)")
                 .font(.system(size: 11, design: .rounded))
                 .foregroundStyle(.quaternary)
         }
     }
-
+    
     @ViewBuilder
     private func rowBackground(_ selected: Bool) -> some View {
         if selected {
@@ -867,7 +871,7 @@ struct ContentView: View {
                 .matchedGeometryEffect(id: "selected", in: ns)
         }
     }
-
+    
     private func keycap(_ s: String) -> some View {
         Text(s)
             .font(.system(size: 10.5, weight: .medium, design: .rounded))
@@ -876,46 +880,51 @@ struct ContentView: View {
             .padding(.vertical, 2)
             .background(Color.white.opacity(0.09), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
     }
-
-    // Show the user what they are typing, matched letters get highlighted like with a marker
+    
+    @ViewBuilder
     private func highlighted(_ title: String) -> some View {
-        markedText(title).textRenderer(MarkerRenderer(color: markerColor))
+        let text = markedText(title)
+        if markerTheme == .highlighter {
+            text.textRenderer(MarkerRenderer(color: markerColour))
+        } else {
+            text
+        }
     }
-
+    
     private func markedText(_ title: String) -> Text {
         let q: String = trimmedQuery
         let matched: Set<Int> = (mode == .find && !q.isEmpty) ? Highlight.matched(q, in: title) : []
         guard !matched.isEmpty else { return Text(title) }
-
-        var attributedString = AttributedString()
+        
+        var segments: [Text] = []
         var buffer = ""
         var bufferMarked = false
-
+        
         for (i, ch) in title.enumerated() {
             let marked: Bool = matched.contains(i)
             if i > 0 && marked != bufferMarked {
-                attributedString.append(makeAttributedString(buffer, marked: bufferMarked))
+                segments.append(segment(buffer, marked: bufferMarked))
                 buffer = ""
             }
             buffer.append(ch)
             bufferMarked = marked
         }
-        attributedString.append(makeAttributedString(buffer, marked: bufferMarked))
-
-        return Text(attributedString)
+        segments.append(segment(buffer, marked: bufferMarked))
+        
+        return segments.reduce(Text(""), +)
     }
-
-    private func makeAttributedString(_ text: String, marked: Bool) -> AttributedString {
-        var attrStr = AttributedString(text)
-        if marked {
-            attrStr.font = .body.bold()
-            attrStr.foregroundColor = .accentColor
-        }
-        return attrStr
-    }
-
+    
     private func segment(_ text: String, marked: Bool) -> Text {
-        marked ? Text(text).customAttribute(MarkedAttribute()) : Text(text)
+        guard marked else { return Text(text) }
+        
+        switch markerTheme {
+        case .highlighter:
+            return Text(text).customAttribute(MarkedAttribute())
+        case .underline:
+            return Text(text).underline(true, color: .white)
+        case .bold:
+            return Text(text).fontWeight(.heavy)
+        }
     }
 
     // What the chip offers depends on what the item is
@@ -992,6 +1001,104 @@ struct ContentView: View {
         return .handled
     }
 
+    // MARK: Side actions
+
+    // Left and right on a row. Leading (←) is "Reveal in Finder", trailing (→) is "Open With…" for files and "Quit" for running apps
+    // The same actions back the swipe gestures, swiping left reveals the trailing one
+    private enum Side { case leading, trailing }
+
+    private func isApp(_ item: Item) -> Bool {
+        item.iconPath?.hasSuffix(".app") == true
+    }
+
+    // nil means this row has nothing for that arrow, so the key falls through and the swipe shows nothing
+    private func sideAction(_ side: Side, for item: Item, at index: Int?) -> SideAction? {
+        guard mode == .find, !doOnboarding, let path = item.iconPath else { return nil } // web searches, calc and notes have none
+        let url = URL(fileURLWithPath: path)
+
+        switch side {
+        case .leading:
+            return SideAction(title: "Reveal in Finder", icon: "folder") {
+                hide()
+                NSWorkspace.shared.activateFileViewerSelecting([url])
+            }
+
+        case .trailing:
+            if isApp(item) {
+                // Only offered while the app is actually running, and never for Ray itself
+                guard runningPaths.contains(path), path != Bundle.main.bundleURL.path else { return nil }
+                return SideAction(title: "Quit", icon: "power") {
+                    hide()
+                    NSWorkspace.shared.runningApplications.first { $0.bundleURL?.path == path }?.terminate()
+                }
+            }
+            return SideAction(title: "Open With…", icon: "ellipsis.circle") {
+                // Next turn of the run loop, so the key press that started this is finished before the menu starts tracking
+                DispatchQueue.main.async {
+                    let picked = OpenWith.show(for: path, at: menuAnchor(forRow: index))
+                    if picked { hide() } else { restoreKeyboard() } // closing the menu with esc leaves the launcher up
+                }
+            }
+        }
+    }
+
+    // A pop-up menu takes keyboard focus while it's open and the launcher doesn't always get it back
+    // So make the panel key again, then ask the text field to focus once it really is
+    private func restoreKeyboard() {
+        if let panel = NSApp.windows.compactMap({ $0 as? LauncherPanel }).first, panel.isVisible {
+            panel.makeKeyAndOrderFront(nil)
+        }
+        for delay in [0.05, 0.25] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                NotificationCenter.default.post(name: .rayFocus, object: nil)
+            }
+        }
+    }
+
+    // Where the Open With menu opens, in screen coordinates, just under the row (or under the launchpad if the map is closed)
+    private func menuAnchor(forRow index: Int?) -> NSPoint {
+        guard let panel = NSApp.windows.compactMap({ $0 as? LauncherPanel }).first else { return NSEvent.mouseLocation }
+
+        let barHeight: CGFloat = (showUtilityBar && isUpdateAvailable) ? 60 + 16 : 0
+        var y: CGFloat = 60 + barHeight + tileSize + launcherPadding * 2 // bottom edge of the launchpad, measured from the top of the window
+        if dropdownVisible, let i = index {
+            y += 16 + dropdownHeaderHeight + CGFloat(i) * (rowHeight + 1) + rowHeight // bottom edge of row i
+        }
+        return NSPoint(x: panel.frame.minX + 60 + dropdownInset + 40, y: panel.frame.maxY - y)
+    }
+
+    private func handleSide(_ side: Side) -> KeyPress.Result {
+        // Left and right only belong to us in Find mode, in Calc and Note they still move the text cursor
+        guard !doOnboarding, mode == .find, results.indices.contains(selection) else { return .ignored }
+        if query.isEmpty && !dropdownVisible { return .ignored }
+        guard let action = sideAction(side, for: results[selection], at: selection) else { return .ignored }
+        action.run()
+        return .handled
+    }
+
+    // The little hint on the selected row, an arrow and the icon of what it does
+    private func sideHint(_ arrow: String, _ action: SideAction) -> some View {
+        HStack(spacing: 3) {
+            Text(arrow)
+            Image(systemName: action.icon)
+        }
+        .font(.system(size: 10.5, weight: .medium, design: .rounded))
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 6)
+        .padding(.vertical, 2)
+        .background(Color.white.opacity(0.09), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+    }
+
+    @ViewBuilder
+    private func swipeButton(_ side: Side, item: Item, index i: Int) -> some View {
+        if let a = sideAction(side, for: item, at: i) {
+            Button { a.run() } label: {
+                Label(a.title, systemImage: a.icon)
+            }
+            .tint(side == .leading ? .orange : .blue)
+        }
+    }
+
     private func handleEscape() -> KeyPress.Result {
         if doOnboarding { // esc skips the tour instead of closing Ray
             finishOnboarding()
@@ -1065,26 +1172,78 @@ struct ContentView: View {
         }
     }
 
-    // Our own file index, rebuilt every 5 minutes in the background instead of using Spotlight (way faster)
+    // Our own file index, rebuilt every 10 minutes in the background instead of using Spotlight (way faster)
     private func indexFiles() async {
+        try? await Task.sleep(for: .seconds(2)) // let the launch and the first open settle before the scan starts
         while !Task.isCancelled {
-            let found = await Task.detached(priority: .utility) { Search.scanFiles() }.value
-            fileEntries = found
+            let found = await Task.detached(priority: .background) { () -> FileIndex in
+                #if DEBUG
+                let t0 = ContinuousClock.now
+                defer { print("file scan:", ContinuousClock.now - t0) }
+                #endif
+                return Search.scanFiles()
+            }.value
+            #if DEBUG
+            print("indexed \(found.count) files, \((found.names.count + found.lower.count) / 1024) KB of names")
+            #endif
+            fileIndex = found
             if mode == .find && !query.isEmpty { searchFiles(trimmedQuery) }
-            try? await Task.sleep(for: .seconds(300))
+            try? await Task.sleep(for: .seconds(600)) // a rescan is the most expensive thing ray does, so it's rare
         }
     }
 
     // Runs off the main thread, then merges into the Find results when it's done
+    // Typing again cancels the search that's still running, so old scans never pile up
     private func searchFiles(_ q: String) {
-        let entries: [FileEntry] = fileEntries
+        fileSearchTask?.cancel()
+
+        // One letter matches almost every file, so the results would be noise and the scan is the most expensive one
+        guard q.count >= 2, fileIndex.count > 0 else {
+            filesPending = false
+            if !fileHits.isEmpty {
+                fileHits = []
+                recomputeFind(preserveSelection: true)
+            }
+            return
+        }
+
+        let index: FileIndex = fileIndex
         let tokens: [[UInt8]] = q.lowercased().split(separator: " ").map { Array($0.utf8) }
-        Task {
-            let top = await Task.detached(priority: .userInitiated) {
-                Search.rankFiles(tokens, in: entries, limit: 6)
-            }.value
-            guard mode == .find, trimmedQuery == q else { return }
+
+        // While searches are quick (a few ms) they run right here, so the best match is on screen in the same frame as the keystroke
+        // If one ever gets slow it moves off the main thread, and the next quick one moves it back
+        if lastFileSearch < .milliseconds(3) {
+            let t0 = ContinuousClock.now
+            let top = Search.rankFiles(tokens, in: index, limit: 6)
+            lastFileSearch = ContinuousClock.now - t0
+            #if DEBUG
+            print("file search '\(q)' (inline):", lastFileSearch)
+            #endif
+            filesPending = false
             fileHits = top.map { fileItem($0) }
+            recomputeFind(preserveSelection: true)
+            return
+        }
+
+        filesPending = true
+        let work = Task.detached(priority: .userInitiated) { () -> (entries: [FileEntry], took: Duration) in
+            let t0 = ContinuousClock.now
+            let top = Search.rankFiles(tokens, in: index, limit: 6)
+            let took = ContinuousClock.now - t0
+            #if DEBUG
+            print("file search '\(q)' (background):", took)
+            #endif
+            return (top, took)
+        }
+        fileSearchTask = work
+
+        Task {
+            let result = await work.value
+            guard !work.isCancelled else { return } // a newer search owns filesPending now
+            lastFileSearch = result.took
+            filesPending = false
+            guard mode == .find, trimmedQuery == q else { return }
+            fileHits = result.entries.map { fileItem($0) }
             recomputeFind(preserveSelection: true)
         }
     }
@@ -1103,17 +1262,25 @@ struct ContentView: View {
 
         switch mode {
         case .find:
-            if q.isEmpty { fileHits = [] }
+            if q.isEmpty {
+                fileSearchTask?.cancel()
+                filesPending = false
+                fileHits = []
+            }
             recomputeFind(preserveSelection: false)
             if !q.isEmpty { searchFiles(q) }
 
         case .calc:
+            fileSearchTask?.cancel()
+            filesPending = false
             let value: String? = Calc.eval(q)
             calcResult = value
             results = value.map { [copyItem($0)] } ?? []
             selection = 0
 
         case .note:
+            fileSearchTask?.cancel()
+            filesPending = false
             calcResult = nil
             results = q.isEmpty ? [] : [noteItem(q)]
             selection = 0
@@ -1121,7 +1288,7 @@ struct ContentView: View {
     }
 
     // Find results are apps first, then files, then web search always last
-    // preserveSelection keeps you on the same row when files arrive late
+    // preserveSelection keeps you on the same row when files arrive late, but only if you had moved off the top one
     private func recomputeFind(preserveSelection: Bool) {
         let q: String = trimmedQuery
         calcResult = nil
@@ -1144,7 +1311,9 @@ struct ContentView: View {
         }
         results = out
 
-        if preserveSelection, let id = keepID, let idx = out.firstIndex(where: { $0.id == id }) {
+        // Late file results only keep your place if you moved off the top row yourself
+        // Otherwise the best match wins, instead of staying stuck on the web search that was the only row when you started typing
+        if preserveSelection, selection != 0, let id = keepID, let idx = out.firstIndex(where: { $0.id == id }) {
             selection = idx
         } else {
             selection = 0
@@ -1210,9 +1379,12 @@ struct ContentView: View {
             mode = .find
             selection = 0
             actionIndex = 0
+            fileSearchTask?.cancel()
+            filesPending = false
             fileHits = []
             calcResult = nil
         }
+        runningPaths = Set(NSWorkspace.shared.runningApplications.compactMap { $0.bundleURL?.path })
         focused = true
         refresh()
         scheduleDropdown()
@@ -1225,4 +1397,3 @@ struct ContentView: View {
         DispatchQueue.main.async { focused = true }
     }
 }
-

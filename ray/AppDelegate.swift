@@ -131,17 +131,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
 
         if let button = item.button {
-            let image = NSImage(systemSymbolName: "rays", accessibilityDescription: "Ray")
-                ?? NSImage(systemSymbolName: "bolt", accessibilityDescription: "Ray")
-            image?.isTemplate = true
+            let image = NSImage(resource: .ray)
+            image.accessibilityDescription = "Ray"
+            image.isTemplate = true
             button.image = image
         }
 
         let menu = NSMenu()
+        
+        let version = menu.addItem(withTitle: "ray Version \(AppVersionManager.currentVersion)", action: nil, keyEquivalent: "")
+        version.target = self
+        version.isEnabled = false
 
         let open = menu.addItem(withTitle: "Open Ray", action: #selector(openFromMenu), keyEquivalent: "")
         open.target = self
-
+ 
         let settings = menu.addItem(withTitle: "Settings…", action: #selector(settingsFromMenu), keyEquivalent: ",")
         settings.target = self
 

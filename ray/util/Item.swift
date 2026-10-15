@@ -148,8 +148,6 @@ nonisolated struct FileIndex: Sendable {
 
 extension Search {
 
-    // MARK: Building the index
-
     // Walks the home folder with plain readdir, no URL objects, so it's fast and barely allocates
     nonisolated static func scanFiles() -> FileIndex {
         let home = realHome()
@@ -256,8 +254,6 @@ extension Search {
         return idx
     }
 
-    // MARK: Searching
-
     // Every space-separated token must appear in the name, in any order
     // The longest token is searched across the whole buffer in one sweep, the other tokens are only checked inside names that already matched
     // Only the best `limit` hits are kept while scanning
@@ -288,9 +284,19 @@ extension Search {
             var cur = 0
             var hits = 0
 
+            // The buffer is searched one 256 KB window at a time, so a search that has gone stale notices within a moment
+            // instead of finishing the whole scan, otherwise fast typing leaves a pile of old searches all running at once
+            let window = 1 << 18
+
             while pos < total {
-                let found = findFirst(hay, total, from: pos, needle: anc, an)
-                if found < 0 { break }
+                let end = min(total, pos + window)
+                let found = findFirst(hay, end, from: pos, needle: anc, an)
+                if found < 0 {
+                    if end >= total { break }
+                    if Task.isCancelled { return }
+                    pos = max(pos + 1, end - an + 1) // overlap a little so a match on the border isn't missed
+                    continue
+                }
 
                 hits &+= 1
                 if hits & 0x3FF == 0 && Task.isCancelled { return } // a newer keystroke made this search stale
@@ -370,39 +376,22 @@ extension Search {
         }
     }
 
-    // First occurrence of the needle at or after `from`, or -1
-    // Compares the needle's first and last byte on 16 positions at a time, and only checks the middle when both line up
+    // First occurrence of the needle in hay[from..<total], or -1
+    // Hands the sweep to the C library (memchr / memmem), which is already optimized and runs just as fast in a Debug build
+    // Hand-written SIMD in Swift is only fast once the compiler optimizes it, in Debug it measured about 300 ms per search
     @inline(__always)
     private nonisolated static func findFirst(_ hay: UnsafePointer<UInt8>, _ total: Int, from: Int,
                                               needle: UnsafePointer<UInt8>, _ n: Int) -> Int {
+        guard n > 0, from + n <= total else { return -1 }
+
+        let hit: UnsafeMutableRawPointer?
         if n == 1 {
-            guard let p = memchr(hay + from, Int32(needle[0]), total - from) else { return -1 }
-            return UnsafeRawPointer(hay).distance(to: UnsafeRawPointer(p))
+            hit = memchr(hay + from, Int32(needle[0]), total - from)
+        } else {
+            hit = memmem(hay + from, total - from, needle, n)
         }
-
-        let first = needle[0]
-        let last = needle[n - 1]
-        let fv = SIMD16<UInt8>(repeating: first)
-        let lv = SIMD16<UInt8>(repeating: last)
-        let raw = UnsafeRawPointer(hay)
-        var i = from
-
-        while i + n + 15 <= total {
-            let a = raw.loadUnaligned(fromByteOffset: i, as: SIMD16<UInt8>.self)
-            let b = raw.loadUnaligned(fromByteOffset: i + n - 1, as: SIMD16<UInt8>.self)
-            let m = (a .== fv) .& (b .== lv)
-            if any(m) {
-                for lane in 0..<16 where m[lane] {
-                    if n == 2 || memcmp(hay + i + lane + 1, needle + 1, n - 2) == 0 { return i + lane }
-                }
-            }
-            i += 16
-        }
-        while i + n <= total {
-            if hay[i] == first && memcmp(hay + i, needle, n) == 0 { return i }
-            i += 1
-        }
-        return -1
+        guard let p = hit else { return -1 }
+        return UnsafeRawPointer(hay).distance(to: UnsafeRawPointer(p))
     }
 
     // Real home folder
@@ -483,22 +472,5 @@ enum Calc {
         s = s.replacingOccurrences(of: "pi", with: "\\pi ")
         s = s.replacingOccurrences(of: "sqrt", with: "\\sqrt")
         return s
-    }
-}
-
-enum Notes {
-    // Appends a dated line to ~/ray-notes.md
-    static func append(_ text: String) {
-        let url = FileManager.default.homeDirectoryForCurrentUser.appending(path: "ray-notes.md")
-        let day = Date.now.formatted(.iso8601.year().month().day())
-        let line = "- \(day) \(text)\n"
-
-        if let h = try? FileHandle(forWritingTo: url) {
-            h.seekToEndOfFile()
-            h.write(Data(line.utf8))
-            try? h.close()
-        } else {
-            try? line.write(to: url, atomically: true, encoding: .utf8)
-        }
     }
 }

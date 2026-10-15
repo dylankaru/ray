@@ -26,7 +26,7 @@ enum Mode: Int, CaseIterable {
         switch self {
         case .find: return "Search apps, files and the web"
         case .calc: return "Type an expression"
-        case .note: return "Write a note"
+        default: return ""
         }
     }
 
@@ -48,8 +48,7 @@ struct PaneAction {
     let run: () -> Void
 }
 
-/// SideAction is what the left and right arrows (and the swipes) do on a row
-/// It closes the launcher itself when it wants to, because Open With needs the launcher to stay up
+/// SideAction is what the left and right arrows + gestures do on a row
 struct SideAction {
     let title: String
     let icon: String
@@ -61,7 +60,7 @@ enum OnboardingEmojiAnimation {
     case wave
 }
 
-/// Things the Onboarding can wait for you to do
+// Things the Onboarding teaches you
 enum OnboardingTask {
     case typing, modeSwitch, arrows, number
 }
@@ -141,7 +140,7 @@ struct GlassCard: ViewModifier {
         let edge = LinearGradient(colors: [Color.black.opacity(0.6), Color.black.opacity(0.6)], startPoint: .top, endPoint: .bottom)
         // I know it's barely noticable but why not
         return content
-            .glassEffect(.regular.tint(Color.black.opacity(0.22)).interactive(), in: s) // Glass is so good TODO: check if you can scale interaction intensity
+            .rayGlassEffect(Color.black.opacity(0.22), interactive: true, in: s) // Glass is so good TODO: check if you can scale interaction intensity
             .overlay(s.strokeBorder(edge, lineWidth: 0.6))
             .shadow(color: .black.opacity(0.35), radius: 22, y: 9)
     }
@@ -160,6 +159,11 @@ struct ContentView: View {
     @AppStorage("ray_still_delay") private static var stillDelay: Double = 3.0
     @AppStorage("ray_onboarded") private var onboarded: Bool = false // Onboarding related
     @AppStorage("ray_marker_theme") private var markerTheme: MarkerTheme = .highlighter
+    @AppStorage("ray_note_destination") private var noteDestination: NoteDestination = .file // Where Note mode saves to
+    @AppStorage("ray_note_draft") private var noteDraft: String = "" // An unsaved note survives closing the launcher
+    @AppStorage("ray_note_draft_base") private var noteDraftBase: String = "" // What a draft was edited from, if anything
+    @AppStorage("ray_marker_colour") private var markerColour: MarkerColour = .yellow
+    @AppStorage("ray_marker_weight") private var markerWeight: MarkerBoldness = .verybold
     
     @State private var query: String = ""
     @State private var mode: Mode = .find
@@ -170,9 +174,9 @@ struct ContentView: View {
     @State private var taskDone: Bool = false  // Onboarding related
     @State private var calcResult: String? = nil
     @State private var fileIndex = FileIndex() // The flat file index, see Item.swift
-    @State private var fileSearchTask: Task<(entries: [FileEntry], took: Duration), Never>? = nil // The file search in flight, cancelled when you type again
-    @State private var filesPending: Bool = false // True while a file search is running, so the web fallback isn't shown as if it were the answer
-    @State private var lastFileSearch: Duration = .milliseconds(100) // How long the last file search took, fast ones run inline
+    @State private var fileSearchTask: Task<(entries: [FileEntry], took: Duration), Never>? = nil
+    @State private var filesPending: Bool = false
+    @State private var lastFileSearch: Duration = .zero // How long the last file search took, fast ones run inline
     @State private var fileHits: [Item] = []
     @State private var showDropdown: Bool = false
     @State private var rowsRevealed: Bool = false
@@ -182,11 +186,14 @@ struct ContentView: View {
     @State private var showUtilityBar: Bool = true
     @State private var isUpdateAvailable = false
     @State private var runningPaths: Set<String> = [] // Apps that are running right now, refreshed whenever the launcher opens
+    @State private var loadedNote: String? = nil // The destination's content that was loaded into the editor, saving replaces it instead of adding it again
+    @State private var noteLayout: Bool = false  // Drives the launchpad's size, flipped inside withAnimation so the resize always animates
     @FocusState private var focused: Bool
     @Namespace private var ns
     @Namespace private var glassNS
     
     private let tileSize: CGFloat = 240
+    private let noteTileSize = CGSize(width: 348, height: 252) // Note mode, wider than tall so there's room to write
     private let rowHeight: CGFloat = 46
     private let launcherRadius: CGFloat = 50
     private let launcherPadding: CGFloat = 16
@@ -195,8 +202,23 @@ struct ContentView: View {
     private let dropdownInset: CGFloat = 8
     private let dropdownHeaderHeight: CGFloat = 36 // Roughly the height of "Suggestions", only used to place the Open With menu
     private let selectionTint = Color.gray.opacity(0.3)
-    private let markerColour = Color.yellow.opacity(0.62)
     
+    // True while the launchpad is the note editor
+    private var isNote: Bool {
+        mode == .note && !doOnboarding
+    }
+
+    // Size follows noteLayout, not the mode, because noteLayout is changed inside withAnimation (see the mode onChange)
+    // An .animation modifier on the mode fought with the quick fade on mode and lost
+    private var tileDimensions: CGSize {
+        noteLayout ? noteTileSize : CGSize(width: tileSize, height: tileSize)
+    }
+
+    private var launcherSize: CGSize {
+        CGSize(width: tileDimensions.width + launcherPadding * 2,
+               height: tileDimensions.height + launcherPadding * 2)
+    }
+
     private var trimmedQuery: String {
         query.trimmingCharacters(in: .whitespaces)
     }
@@ -233,7 +255,20 @@ struct ContentView: View {
     var body: some View {
         keyHandled
             .onChange(of: query) { _, newValue in queryChanged(newValue) }
-            .onChange(of: mode) { refresh(); scheduleDropdown(); if mode != .find { completeTask(.modeSwitch) } }
+            .onChange(of: mode) {
+                refresh(); scheduleDropdown()
+                if mode != .find { completeTask(.modeSwitch) }
+                if mode == .note && !doOnboarding && query.isEmpty {
+                    if !noteDraft.isEmpty {
+                        loadedNote = noteDraftBase.isEmpty ? nil : noteDraftBase // set first, the save action captures it
+                        query = noteDraft                                        // an unsaved note comes back first
+                    } else {
+                        loadDestinationContent()                                 // nothing unsaved, so show what's already there
+                    }
+                }
+                withAnimation(Self.dropdownSpring) { noteLayout = isNote } // same spring as the map opening, in its own transaction so nothing else can override it
+                refocus() // the editor is a different view from the search field, so focus has to move
+            }
             .onChange(of: selection) { actionIndex = 0 }
             .onChange(of: dropdownVisible) { _, visible in revealRows(visible) }
             .onReceive(NotificationCenter.default.publisher(for: .rayReset)) { _ in reset() }
@@ -336,13 +371,24 @@ struct ContentView: View {
     
     private var launcher: some View {
         tile
+            .frame(width: tileDimensions.width, height: tileDimensions.height) // the same animated size the glass uses
+            .background(tileBackground) // the inner rect lives here, not inside the tiles, so it never snaps ahead of the glass
             .padding(launcherPadding)
-            .frame(width: tileSize + launcherPadding * 2, height: tileSize + launcherPadding * 2) // <-- Add height here
+            .frame(width: launcherSize.width, height: launcherSize.height)
             .modifier(GlassCard(radius: launcherRadius))
             .glassEffectID("launcher", in: glassNS)
     }
     
+    @ViewBuilder
     private var tile: some View {
+        if mode == .note && !doOnboarding {
+            noteTile
+        } else {
+            findTile
+        }
+    }
+
+    private var findTile: some View {
         VStack(spacing: 12) {
             if doOnboarding, let emoji = Onboarding.steps[onboardingStep].emoji {
                 OnboardingEmojiView(
@@ -357,7 +403,6 @@ struct ContentView: View {
         .padding(.horizontal, 16)
         .frame(width: tileSize, height: tileSize, alignment: .center)
         .overlay(alignment: .bottom) { tileBottom } // an overlay never changes the tile's size
-        .background(tileBackground)
     }
     
     // Fill and outline share one radius, strokeBorder keeps the outline inside the shape
@@ -382,6 +427,154 @@ struct ContentView: View {
         .padding(.bottom, 14)
     }
     
+    private var noteTile: some View {
+        VStack(spacing: 0) {
+//            noteHeader
+            noteEditor
+            noteFooter
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity) // fills whatever size the launchpad is animating through
+    }
+
+    private var noteHeader: some View {
+        HStack(spacing: 6) {
+            Button {
+                switchNoteDestination()
+                focused = true
+            } label: {
+                HStack(spacing: 5) {
+                    Image(systemName: noteDestination.icon)
+                    Text(noteDestination.title)
+                    Image(systemName: "chevron.up.chevron.down")
+                        .font(.system(size: 8, weight: .semibold))
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(Capsule().fill(Color.white.opacity(0.10)))
+            }
+            .buttonStyle(.plain)
+            .help("Where notes are saved, click or press ⌥↑ ⌥↓ to switch")
+        }
+        .font(.system(size: 11, weight: .medium))
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 14)
+        .padding(.top, 12)
+        .padding(.bottom, 4)
+    }
+    
+    private var notesYayFactor: [String] = [
+        "Write a note",
+        "Ready when you are",
+        "What's your next million dollar business idea?",
+        "How are you blessing your notes today?",
+        "Moles of hydrogen is two times moles of water",
+        "Fun fact: a broken themometer is right twice a day",
+        "I'm the brightest tool in the shed",
+        "Type away",
+        "He loves using Claude to generate questions for Gemini",
+    ]
+
+    private var noteEditor: some View {
+        TextEditor(text: $query)
+            .font(.system(size: 14))
+            .lineSpacing(2)
+            .scrollContentBackground(.hidden)
+            .focused($focused)
+            .padding(.horizontal, 18)
+            .padding(.top, 18)
+            .overlay(alignment: .topLeading) {
+                if query.isEmpty {
+                    Text(notesYayFactor.randomElement() ?? "Kevin can't remember things")
+                        .font(.system(size: 14))
+                        .foregroundStyle(.tertiary)
+                        .padding(.leading, 4)
+                        .padding(.horizontal, 18)
+                        .padding(.top, 18)
+                        .allowsHitTesting(false)
+                }
+            }
+            .onKeyPress(.return, phases: .down) { press in handleNoteReturn(press) }
+            .onKeyPress(.tab, phases: .down) { press in handleTab(press) }
+            .onKeyPress(.escape) { handleEscape() }
+            .onKeyPress(.delete) { handleDelete() }
+    }
+
+    private var noteFooter: some View {
+        HStack() {
+            noteStats
+            Spacer()
+            HStack {
+                keycap("↵")
+                Text("Save")
+            }
+            HStack {
+                keycap("⇧↵")
+                Text("New line")
+            }
+        }
+        .font(.system(size: 11))
+        .foregroundStyle(.tertiary)
+        .padding(.horizontal, 50)
+        .padding(.top, 4)
+        .padding(.bottom, 12)
+    }
+    
+    private var noteStats: some View {
+        Text(noteStatsString)
+            .monospacedDigit()
+            .foregroundStyle(.tertiary)
+    }
+
+    private var noteStatsString: String {
+        let words = query.split { $0.isWhitespace }.count
+        return words == 0 ? "0 words" : "\(words) word" + (words == 1 ? "" : "s")
+    }
+
+    // Shift-return and option-return are a new line, the editor inserts that itself
+    // A bare return saves, an empty note just ignores it
+    private func handleNoteReturn(_ press: KeyPress) -> KeyPress.Result {
+        if press.modifiers.contains(.shift) || press.modifiers.contains(.option) { return .ignored }
+        run()
+        return .handled
+    }
+
+    // Shows what the destination already holds (the file, or Apple Notes' first note) in the editor
+    // Saving then replaces that content, see noteItem and Notes.replace
+    private func loadDestinationContent() {
+        Task {
+            guard let existing = await Notes.load(), !existing.isEmpty else { return }
+            guard mode == .note, query.isEmpty else { return } // you may have typed or left Note mode while it loaded
+            loadedNote = existing // set before the query, the save action captures it
+            query = existing
+        }
+    }
+
+    // ⌥↑ ⌥↓ in Note mode. If the loaded text is untouched it's swapped for the other destination's content
+    // If you've edited it, your text stays and will be saved as a new note instead
+    private func switchNoteDestination() {
+        let untouched = loadedNote != nil && query == loadedNote
+        noteDestination = noteDestination.other
+        loadedNote = nil
+        guard untouched else { return }
+
+        query = ""
+        Task {
+            guard let existing = await Notes.load(from: noteDestination), !existing.isEmpty else { return }
+            guard mode == .note, query.isEmpty else { return }
+            loadedNote = existing
+            query = existing
+        }
+    }
+
+    // Leaving Note mode: unsaved text becomes the draft, loaded text you didn't change isn't one, and the editor is emptied
+    // Without the last part the note would stay in `query` and show up as the search text in the other modes
+    private func stashNote() {
+        noteDraft = (query == loadedNote) ? "" : query
+        noteDraftBase = noteDraft.isEmpty ? "" : (loadedNote ?? "") // remembers what the draft was edited from
+        loadedNote = nil
+        query = ""
+    }
+
     private struct WaveValues {
         var rotation: Double = 0
     }
@@ -483,7 +676,7 @@ struct ContentView: View {
                 .lineLimit(2)
                 .multilineTextAlignment(.center)
         } else {
-            Text(query.isEmpty ? "Type to search" : (filesPending ? "Searching…" : "No matches"))
+            Text(query.isEmpty ? "Type to search" : (filesPending ? " " : "No matches"))
                 .font(.system(size: 14))
             //                .monospaced() // Optional, to be a setting maybe
                 .foregroundStyle(.tertiary)
@@ -648,7 +841,7 @@ struct ContentView: View {
                 .font(.system(size: 10))
                 .foregroundStyle(.tertiary)
             (Text("Saf").customAttribute(MarkedAttribute()) + Text("ari"))
-                .textRenderer(MarkerRenderer(color: markerColour))
+                .textRenderer(MarkerRenderer(color: markerColour.colour))
                 .font(.system(size: 16, weight: .medium))
         }
         .padding(.top, 6)
@@ -885,7 +1078,7 @@ struct ContentView: View {
     private func highlighted(_ title: String) -> some View {
         let text = markedText(title)
         if markerTheme == .highlighter {
-            text.textRenderer(MarkerRenderer(color: markerColour))
+            text.textRenderer(MarkerRenderer(color: markerColour.colour))
         } else {
             text
         }
@@ -923,7 +1116,7 @@ struct ContentView: View {
         case .underline:
             return Text(text).underline(true, color: .white)
         case .bold:
-            return Text(text).fontWeight(.heavy)
+            return Text(text).fontWeight(markerWeight.weight)
         }
     }
 
@@ -933,7 +1126,7 @@ struct ContentView: View {
             return [PaneAction(title: "Copy", icon: "doc.on.doc", run: item.action)]
         }
         if mode == .note {
-            return [PaneAction(title: "Save Note", icon: "square.and.pencil", run: item.action)]
+            return [PaneAction(title: "Save to \(noteDestination.title)", icon: "square.and.pencil", run: item.action)]
         }
         if item.id.hasPrefix("web:") {
             return [PaneAction(title: "Search", icon: "arrow.up.right", run: item.action)]
@@ -955,6 +1148,10 @@ struct ContentView: View {
     }
 
     private func cycleAction(_ d: Int) {
+        if mode == .note && !doOnboarding { // in Note mode these keys pick where the note goes
+            switchNoteDestination()
+            return
+        }
         let n: Int = currentActions.count
         guard n > 1 else { return }
         actionIndex = (actionIndex + d + n) % n
@@ -1060,7 +1257,7 @@ struct ContentView: View {
         guard let panel = NSApp.windows.compactMap({ $0 as? LauncherPanel }).first else { return NSEvent.mouseLocation }
 
         let barHeight: CGFloat = (showUtilityBar && isUpdateAvailable) ? 60 + 16 : 0
-        var y: CGFloat = 60 + barHeight + tileSize + launcherPadding * 2 // bottom edge of the launchpad, measured from the top of the window
+        var y: CGFloat = 60 + barHeight + launcherSize.height // bottom edge of the launchpad, measured from the top of the window
         if dropdownVisible, let i = index {
             y += 16 + dropdownHeaderHeight + CGFloat(i) * (rowHeight + 1) + rowHeight // bottom edge of row i
         }
@@ -1121,6 +1318,7 @@ struct ContentView: View {
     // Backspace on an empty field drops you back to Find
     private func handleDelete() -> KeyPress.Result {
         guard query.isEmpty, mode != .find else { return .ignored }
+        if mode == .note && !doOnboarding { stashNote() }
         mode = .find
         return .handled
     }
@@ -1136,8 +1334,10 @@ struct ContentView: View {
 
     private func step(_ d: Int) {
         let all: [Mode] = Mode.allCases
-        let next: Int = (mode.rawValue + d + all.count) % all.count
-        mode = all[next]
+        let next: Mode = all[(mode.rawValue + d + all.count) % all.count]
+        if mode == .note && !doOnboarding { stashNote() }  // note text must not turn into a search
+        if next == .note && !doOnboarding { query = "" }   // and search text must not turn into a note, the draft or destination content loads instead
+        mode = next
     }
 
     private func move(_ d: Int) {
@@ -1161,7 +1361,7 @@ struct ContentView: View {
                 NSWorkspace.shared.openApplication(at: url, configuration: NSWorkspace.OpenConfiguration())
             })
         }
-        pool = items + [settingsItem]
+        pool = items + [settingsItem, notesItem]
         refresh()
     }
 
@@ -1169,6 +1369,12 @@ struct ContentView: View {
     private var settingsItem: Item {
         Item(id: "cmd:settings", title: "Ray Settings", icon: "gearshape", subtitle: "Command") {
             AppDelegate.openSettings()
+        }
+    }
+
+    private var notesItem: Item {
+        Item(id: "cmd:notes", title: "Ray Notes", icon: "note.text", subtitle: "Command") {
+            Notes.open()
         }
     }
 
@@ -1212,7 +1418,7 @@ struct ContentView: View {
 
         // While searches are quick (a few ms) they run right here, so the best match is on screen in the same frame as the keystroke
         // If one ever gets slow it moves off the main thread, and the next quick one moves it back
-        if lastFileSearch < .milliseconds(3) {
+        if lastFileSearch < .milliseconds(8) {
             let t0 = ContinuousClock.now
             let top = Search.rankFiles(tokens, in: index, limit: 6)
             lastFileSearch = ContinuousClock.now - t0
@@ -1282,7 +1488,8 @@ struct ContentView: View {
             fileSearchTask?.cancel()
             filesPending = false
             calcResult = nil
-            results = q.isEmpty ? [] : [noteItem(q)]
+            let body: String = query.trimmingCharacters(in: .whitespacesAndNewlines)
+            results = body.isEmpty ? [] : [noteItem(query)]
             selection = 0
         }
     }
@@ -1296,9 +1503,9 @@ struct ContentView: View {
 
         var out: [Item] = []
         if q.isEmpty {
-            out = Search.rank("", in: pool, limit: 7)
+            out = Search.rank("", in: pool, limit: 8)
         } else {
-            let apps: [Item] = Search.rank(q, in: pool, limit: 4)
+            let apps: [Item] = Search.rank(q, in: pool, limit: 8)
             let tokens: [String] = q.lowercased().split(separator: " ").map { String($0) }
             let files: [Item] = fileHits
                 .filter { item in
@@ -1327,10 +1534,12 @@ struct ContentView: View {
         }
     }
 
-    // Notes get appended to ~/ray-notes.md
+    // Saved to whichever destination is picked at the moment you press return, see Notes.swift
+    // If the editor was opened with the destination's existing content the save replaces it, otherwise it adds a new note
     private func noteItem(_ text: String) -> Item {
-        Item(id: "note", title: text, icon: "square.and.pencil", subtitle: "Save note") {
-            Notes.append(text)
+        let loaded = loadedNote // captured now, so the save knows whether it's editing loaded content
+        return Item(id: "note", title: text, icon: "square.and.pencil", subtitle: "Save note") {
+            if let loaded { Notes.replace(loaded: loaded, with: text) } else { Notes.save(text) }
         }
     }
 
@@ -1361,6 +1570,11 @@ struct ContentView: View {
         guard results.indices.contains(selection) else { return }
         if mode == .find && query.isEmpty && !dropdownVisible { return }
         let chosen: PaneAction? = currentAction
+        if mode == .note { // saved, so there is nothing left to restore
+            noteDraft = ""
+            noteDraftBase = ""
+            query = ""
+        }
         hide()
         chosen?.run()
     }
@@ -1371,6 +1585,8 @@ struct ContentView: View {
 
     // Always open and close empty
     private func reset() {
+        if mode == .note && !doOnboarding { stashNote() } // closing with unsaved text keeps it as a draft
+        loadedNote = nil
         var t = Transaction(animation: nil)
         t.disablesAnimations = true
         withTransaction(t) {
@@ -1396,4 +1612,4 @@ struct ContentView: View {
         focused = false
         DispatchQueue.main.async { focused = true }
     }
-}
+}   

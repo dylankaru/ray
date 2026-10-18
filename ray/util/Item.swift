@@ -13,20 +13,23 @@ import AppKit
 struct Item: Identifiable {
     let id: String
     let title: String
-    let icon: String // SF symbol, used when there's no iconPath given
+    let icon: String
     let subtitle: String?
-    let iconPath: String? // If you have a proper image for an action
+    let iconPath: String?
     let bytes: [UInt8]
+    let aliases: [[UInt8]]
     let action: () -> Void
 
     init(id: String, title: String, icon: String, subtitle: String? = nil,
-         iconPath: String? = nil, action: @escaping () -> Void) {
+         iconPath: String? = nil, aliases: [String] = [],
+         action: @escaping () -> Void) {
         self.id = id
         self.title = title
         self.icon = icon
         self.subtitle = subtitle
         self.iconPath = iconPath
         self.bytes = Array(title.lowercased().utf8)
+        self.aliases = aliases.map { Array($0.lowercased().utf8) }
         self.action = action
     }
 }
@@ -44,28 +47,53 @@ enum IconCache {
     }
 }
 
-// Fuzzy search learns how you interact with ray
 enum Fuzzy {
+    // Max characters allowed between two matched letters, Adon and Sidhu said that it was too fuzzy
+    private static let maxGap = 5
+    
     static func score(_ q: [UInt8], _ t: [UInt8]) -> Int? {
+        guard !q.isEmpty else { return 0 }
+        
+        if let pos = find(q, in: t) {
+            var s = 100 - min(pos, 40)
+            if pos == 0 { s += 60 }
+            else if t[pos - 1] == 32 { s += 30 }
+            return s - t.count / 4
+        }
+        
+        guard q.count >= 3 else { return nil }
+        
         var qi = 0
         var score = 0
-        var prev = -2
-
+        var prev = -1
+        
         for (ti, c) in t.enumerated() {
             guard qi < q.count else { break }
             if c == q[qi] {
+                let atWordStart = ti == 0 || t[ti - 1] == 32
+                if qi == 0 && !atWordStart { continue }          // must begin on a word start
+                if prev >= 0 && ti - prev - 1 > maxGap { return nil } // gap too big
+                
                 var s = 1
-                if ti == 0 { s += 8 } // first letter
-                else if t[ti - 1] == 32 { s += 6 } // start of a word
-                if prev == ti - 1 { s += 4 } // consecutive letters
+                if ti == 0 { s += 8 }
+                else if atWordStart { s += 6 }
+                if prev == ti - 1 { s += 4 }
                 score += s
                 prev = ti
                 qi += 1
             }
         }
         guard qi == q.count else { return nil }
-        if t.starts(with: q) { score += 20 } // exact prefix
-        return score - t.count / 4 // prefer shorter names
+        return score - t.count / 4
+    }
+    
+    fileprivate static func find(_ q: [UInt8], in t: [UInt8]) -> Int?  {
+        guard q.count <= t.count else { return nil }
+        for i in 0...(t.count - q.count) where t[i..<(i + q.count)].elementsEqual(q) {
+            return i
+        }
+        return nil
+        
     }
 }
 
@@ -76,6 +104,17 @@ enum Search {
 
         var scored: [(Item, Int)] = []
         for item in pool {
+            let aliases = item.aliases + AliasStore.bytes(for: item.id)
+
+            if aliases.contains(q) {
+                scored.append((item, 10_000))
+                continue
+            }
+
+            if q.count >= 2, aliases.contains(where: { $0.starts(with: q) }) {
+                scored.append((item, 5_000))
+                continue
+            }
             if let s = Fuzzy.score(q, item.bytes) { scored.append((item, s)) }
         }
         scored.sort { $0.1 > $1.1 }

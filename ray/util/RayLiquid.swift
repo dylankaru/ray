@@ -52,7 +52,7 @@ extension View {
     }
     
     @ViewBuilder
-    public func conditionalGlassButton() -> some View {
+    public func rayGlassButton() -> some View {
         if #available(macOS 26, *) {
             self.buttonStyle(.glass)
         } else {

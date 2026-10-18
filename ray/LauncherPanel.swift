@@ -16,7 +16,7 @@ extension Notification.Name {
 }
 
 final class LauncherPanel: NSPanel {
-    static let size = NSSize(width: 520, height: 900)
+    static let size = NSSize(width: 2000, height: 910)
 
     init<V: View>(rootView: V) {
         super.init(
@@ -26,12 +26,12 @@ final class LauncherPanel: NSPanel {
             defer: false
         )
         isFloatingPanel = true
-        level = .floating
+        level = .screenSaver
         isOpaque = false
         backgroundColor = .clear
         hasShadow = false
         animationBehavior = .none
-        collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
 
         let hosting = NSHostingView(rootView: rootView)
         hosting.sizingOptions = [] // the hosting view never drives the window size
@@ -60,16 +60,34 @@ final class LauncherPanel: NSPanel {
     override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect {
         frameRect
     }
+    
+    override func noResponder(for eventSelector: Selector) {
+        if eventSelector == #selector(NSResponder.keyDown(with:)) {
+            NotificationCenter.default.post(name: .rayFocus, object: nil)
+            return
+        }
+        super.noResponder(for: eventSelector)
+    }
+
+    override func sendEvent(_ event: NSEvent) {
+        if (event.type == .leftMouseDown || event.type == .rightMouseDown), !isKeyWindow {
+            makeKeyAndOrderFront(nil)
+        }
+        super.sendEvent(event)
+    }
 
     func positionOnActiveScreen() {
-        let screen = NSScreen.main ?? NSScreen.screens[0]
-        let f = screen.visibleFrame
+        let mouse = NSEvent.mouseLocation
+        let screen = NSScreen.screens.first { NSMouseInRect(mouse, $0.frame, false) }
+            ?? NSScreen.main ?? NSScreen.screens[0]
+
+        let full = screen.frame
+        let visible = screen.visibleFrame
         let size = Self.size
 
-        // The content is top-aligned, so anchor the window by its top edge
-        // This is the same top edge a centered 800pt window had, so the launchpad sits where it always did
-        let top = min(f.midY + 400, f.maxY)
-        let origin = NSPoint(x: f.midX - size.width / 2, y: top - size.height)
+        // Centred horizontally on the whole screen and vertically in the area below the menu bar
+        let origin = NSPoint(x: full.midX - size.width / 2,
+                             y: visible.midY - size.height / 2)
 
         setFrame(NSRect(origin: origin, size: size), display: false)
     }

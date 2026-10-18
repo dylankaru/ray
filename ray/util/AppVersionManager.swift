@@ -10,6 +10,7 @@ import Foundation
 struct UpdateConfig {
     static let githubAccount = "dylankaru"
     static let githubRepo = "ray"
+    static let githubRepoLink = URL(string: "https://github.com/\(UpdateConfig.githubAccount)/\(UpdateConfig.githubRepo)/releases/latest")
 
     static let checkInterval: TimeInterval = 6 * 60 * 60
 
@@ -27,7 +28,7 @@ private func updateLog(_ message: String) {
 }
 
 struct AppVersionManager {
-    static var currentVersion: String {
+    public static var currentVersion: String {
         Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0.0"
     }
 
@@ -102,10 +103,9 @@ final class AppUpdateChecker {
         // Debug mock
         if let mock = UpdateConfig.mockLatestVersion {
             updateLog("MOCK mode on. Pretending latest is \(mock), forced: \(UpdateConfig.simulateForceUpdate)")
-            let url = URL(string: "https://github.com/\(UpdateConfig.githubAccount)/\(UpdateConfig.githubRepo)/releases/latest")
             return evaluate(current: current,
                             latest: mock,
-                            downloadURL: url,
+                            downloadURL: UpdateConfig.githubRepoLink,
                             isForced: UpdateConfig.simulateForceUpdate)
         }
 

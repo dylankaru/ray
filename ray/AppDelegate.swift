@@ -105,15 +105,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         current?.dismissPanel()
     }
 
-    // Switches to a regular app
     private func showInDock(then done: @escaping () -> Void) {
-        let ok = NSApp.setActivationPolicy(.regular)
-        print("Ray: setActivationPolicy(.regular) ->", ok, "policy:", NSApp.activationPolicy().rawValue)
+        NSApp.setActivationPolicy(.regular)
 
         DispatchQueue.main.async {
             NSApp.setActivationPolicy(.accessory)
             DispatchQueue.main.async {
                 NSApp.setActivationPolicy(.regular)
+                DispatchQueue.main.async { done() }
             }
         }
     }

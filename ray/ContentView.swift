@@ -20,12 +20,13 @@ import SwiftUI
 
 // Mode is what the launcher is currently doing with what you type
 enum Mode: Int, CaseIterable {
-    case find, calc, note
+    case find, calc, note, ivy, camera
 
     var prompt: String {
         switch self {
         case .find: return "Search apps, files and the web"
         case .calc: return "Type an expression"
+        case .ivy:  return "Ask Ivy anything"
         default: return ""
         }
     }
@@ -41,10 +42,11 @@ enum Mode: Int, CaseIterable {
 }
 
 /// PaneAction is the expected shape of an option command in ray
-/// All parameters are required
+/// keepsOpen defaults to false, set it to true for actions that should leave the launchpad on screen
 struct PaneAction {
     let title: String
     let icon: String
+    var keepsOpen: Bool = false
     let run: () -> Void
 }
 
@@ -54,6 +56,25 @@ struct SideAction {
     let icon: String
     let run: () -> Void
 }
+
+// One message in the Ivy chat
+struct ChatMessage: Identifiable, Equatable {
+    enum Role { case user, assistant }
+    let id = UUID()
+    let role: Role
+    var text: String
+}
+
+// Stub, swap in your real Ivy backend
+enum ChatService {
+    static func reply(to history: [ChatMessage]) async -> String {
+        try? await Task.sleep(for: .seconds(1))
+        return "This is where Ivy's answer goes."
+    }
+}
+
+// The launchpad's three sizes, compact is the square, note and chat are wider so there's room to write
+enum TileLayout { case compact, note, chat }
 
 // Different types of animations for the emoji that lives in the launchpad
 enum OnboardingEmojiAnimation {
@@ -165,6 +186,10 @@ struct ContentView: View {
     @AppStorage("ray_marker_colour") private var markerColour: MarkerColour = .yellow
     @AppStorage("ray_marker_weight") private var markerWeight: MarkerBoldness = .verybold
     
+    @State private var showingCamera = false
+    @State private var showingClipboardHistory = false
+    @State private var aliasContentIn: Bool = false // the bubble's contents fade in a beat after the bubble itself
+    
     @State private var query: String = ""
     @State private var mode: Mode = .find
     @State private var selection: Int = 0
@@ -184,41 +209,70 @@ struct ContentView: View {
     @State private var actionIndex: Int = 0
     @State private var lastMouseLocation: CGPoint = .zero
     @State private var showUtilityBar: Bool = true
-    @State private var isUpdateAvailable = false
+    @State private var updateStatus: AppUpdateChecker.UpdateStatus = .upToDate
     @State private var runningPaths: Set<String> = [] // Apps that are running right now, refreshed whenever the launcher opens
     @State private var loadedNote: String? = nil // The destination's content that was loaded into the editor, saving replaces it instead of adding it again
-    @State private var noteLayout: Bool = false  // Drives the launchpad's size, flipped inside withAnimation so the resize always animates
+    @State private var tileLayout: TileLayout = .compact
+    @State private var chatMessages: [ChatMessage] = [] // The Ivy conversation, survives closing the launcher
+    @State private var isReplying: Bool = false
+    
+    @State private var aliasTarget: Item? = nil      // the item the bubble is for, nil = closed
+    @State private var aliasRow: Int? = nil
+    @State private var aliasDraft: String = ""
+    @State private var aliasList: [String] = []
+    @FocusState private var aliasFocused: Bool
+    
     @FocusState private var focused: Bool
+    private let clipboard = ClipboardManager.shared // shared, starts recording at launch
     @Namespace private var ns
     @Namespace private var glassNS
     
+    private var availableUpdate: (version: String, url: URL?, isForced: Bool)? {
+        if case let .updateAvailable(version, url, isForced) = updateStatus {
+            return (version, url, isForced)
+        }
+        return nil
+    }
+
+    private var isUpdateAvailable: Bool { availableUpdate != nil }
+    
     private let tileSize: CGFloat = 240
     private let noteTileSize = CGSize(width: 348, height: 252) // Note mode, wider than tall so there's room to write
+    private let ivyTileSize = CGSize(width: 650, height: 380) // Ivy mode, bigger than Note so a conversation fits
     private let rowHeight: CGFloat = 46
     private let launcherRadius: CGFloat = 50
     private let launcherPadding: CGFloat = 16
     private let tileRadius: CGFloat = 38
     private let dropdownRadius: CGFloat = 28
     private let dropdownInset: CGFloat = 8
-    private let dropdownHeaderHeight: CGFloat = 36 // Roughly the height of "Suggestions", only used to place the Open With menu
+    private let dropdownHeaderHeight: CGFloat = 36
     private let selectionTint = Color.gray.opacity(0.3)
     
     // True while the launchpad is the note editor
     private var isNote: Bool {
         mode == .note && !doOnboarding
     }
-
-    // Size follows noteLayout, not the mode, because noteLayout is changed inside withAnimation (see the mode onChange)
+    
+    // True while the launchpad is the Ivy chat
+    private var isIvy: Bool {
+        mode == .ivy && !doOnboarding
+    }
+    
+    // Size follows tileLayout, not the mode, because tileLayout is changed inside withAnimation (see the mode onChange)
     // An .animation modifier on the mode fought with the quick fade on mode and lost
     private var tileDimensions: CGSize {
-        noteLayout ? noteTileSize : CGSize(width: tileSize, height: tileSize)
+        switch tileLayout {
+        case .compact: return CGSize(width: tileSize, height: tileSize)
+        case .note: return noteTileSize
+        case .chat: return ivyTileSize
+        }
     }
-
+    
     private var launcherSize: CGSize {
         CGSize(width: tileDimensions.width + launcherPadding * 2,
                height: tileDimensions.height + launcherPadding * 2)
     }
-
+    
     private var trimmedQuery: String {
         query.trimmingCharacters(in: .whitespaces)
     }
@@ -228,6 +282,7 @@ struct ContentView: View {
     }
     
     private var dropdownVisible: Bool {
+        if showingClipboardHistory { return true } // clipboard history lives in the dropdown, so it stays open until you leave it
         if doOnboarding { return showDropdown } // the tour opens the dropdown even though there's nothing to list
         return showDropdown && results.count > 1 && mode != .calc // If there is only one result what's the point of the dropdown
     }
@@ -266,16 +321,22 @@ struct ContentView: View {
                         loadDestinationContent()                                 // nothing unsaved, so show what's already there
                     }
                 }
-                withAnimation(Self.dropdownSpring) { noteLayout = isNote } // same spring as the map opening, in its own transaction so nothing else can override it
-                refocus() // the editor is a different view from the search field, so focus has to move
+                
+                withAnimation(Self.dropdownSpring) {
+                    tileLayout = isNote ? .note : (isIvy ? .chat : .compact)
+                }
+                refocus() // the editor and chat bar are different views from the search field, so focus has to move
             }
-            .onChange(of: selection) { actionIndex = 0 }
-            .onChange(of: dropdownVisible) { _, visible in revealRows(visible) }
+            .onChange(of: selection) { actionIndex = 0; closeAliasBubble() }
+            .onChange(of: showingClipboardHistory) { refresh(); scheduleDropdown() } // swaps results between Find and the clipboard
+            .onChange(of: clipboard.items) { if showingClipboardHistory { refresh() } }
+            .onChange(of: dropdownVisible) { _, visible in revealRows(visible); if !visible { closeAliasBubble() }}
             .onReceive(NotificationCenter.default.publisher(for: .rayReset)) { _ in reset() }
             .onReceive(NotificationCenter.default.publisher(for: .rayFocus)) { _ in refocus() }
             .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { _ in
                 refocus()
             }
+            .task { _ = ClipboardManager.shared }
             .task { await loadApps() }
             .task { await indexFiles() }
             .onAppear { focused = true; refresh(); scheduleDropdown() }
@@ -286,7 +347,7 @@ struct ContentView: View {
             .onKeyPress(.downArrow) { handleDown() }
             .onKeyPress(.upArrow)   { move(-1); return .handled }
             .onKeyPress(.leftArrow)  { handleSide(.leading) }  // ← Reveal in Finder
-            .onKeyPress(.rightArrow) { handleSide(.trailing) } // → Open With (files) or Quit (apps)
+            .onKeyPress(.rightArrow) { handleSide(.trailing) } // → Open With (files), Set Alias (apps and commands)
             .onKeyPress(.escape)    { handleEscape() }
             .onKeyPress(.tab, phases: .down) { press in handleTab(press) } // Tab swaps between Find, Calc and Note
             .onKeyPress(.delete)    { handleDelete() }
@@ -303,13 +364,39 @@ struct ContentView: View {
     private var stage: some View {
         GlassEffectContainer(spacing: 16) {
             VStack(spacing: 16) {
-                if showUtilityBar && isUpdateAvailable {
+                if showUtilityBar, let update = availableUpdate {
                     utilityBar {
-                        HStack {
-                            //                            Image(systemName: "radar")
-                            Text("An update for ray is [available](https://github.com/dylankaru/ray/releases/latest).")
+                        VStack {
+                            HStack {
+                                Image("git.diff")
+                                    .renderingMode(.template)
+                                    .font(.system(size: 28, weight: .heavy))
+                                    .opacity(0.9)
+                                
+                                VStack(alignment: .leading, spacing: 2) {
+                                    HStack(spacing: 0) {
+                                        Text("A new version of ray is ")
+                                        Link(destination: URL(string: "https://github.com/dylankaru/ray/releases/latest")!) {
+                                            FlowingGradientText(text: "available")
+                                        }
+                                        .pointerStyle(.link)
+                                        Text(".")
+                                    }
+                                    .font(.system(size: 13, weight: .medium))
+                                    
+                                    HStack(spacing: 2) {
+                                        Text("Update v\(AppVersionManager.currentVersion)")
+                                            .italic()
+                                        Image(systemName: "arrow.right")
+                                            .font(.system(size: 10, weight: .bold))
+                                        Text("v\(update.version)")
+                                            .italic()
+                                    }
+                                    .foregroundStyle(.secondary)
+                                    .font(.system(size: 10, weight: .regular))
+                                }
+                            }
                         }
-                        .font(.system(size: 13, weight: .medium))
                     }
                 }
                 launcher // Launchpad
@@ -317,12 +404,17 @@ struct ContentView: View {
                     dropdown // Map
                 }
             }
-            .frame(width: 380, alignment: .top)
+            .frame(width: ivyTileSize.width + launcherPadding * 2, alignment: .top) // constant, widest launchpad. A width that animates makes NSHostingView re-run window size constraints forever (crash)
+            .overlay(alignment: .topLeading) { aliasBubbleOverlay } // the alias speech bubble, drawn inside the panel so it works over full-screen apps
         }
         .animation(Self.dropdownSpring, value: dropdownVisible)
         .animation(.smooth(duration: 0.16), value: mode)
         .task {
-            isUpdateAvailable = await checkForUpdates()
+            #if DEBUG
+            updateStatus = .updateAvailable(version: "9.9.9", downloadURL: UpdateConfig.githubRepoLink, isForced: false)
+            #else
+            updateStatus = await AppUpdateChecker.shared.checkAppUpdate()
+            #endif
         }
     }
     
@@ -358,6 +450,7 @@ struct ContentView: View {
             }
             Button("") { cycleAction(1) }.keyboardShortcut(.downArrow, modifiers: .option)
             Button("") { cycleAction(-1) }.keyboardShortcut(.upArrow, modifiers: .option)
+            Button("") { quitSelectedApp() }.keyboardShortcut(.rightArrow, modifiers: .option) // ⌥→ quits the selected running app
         }
         .opacity(0)
         .frame(width: 0, height: 0)
@@ -379,10 +472,17 @@ struct ContentView: View {
             .glassEffectID("launcher", in: glassNS)
     }
     
+    // The clipboard isn't a branch here on purpose, swapping the tile out would remove the hidden text field
+    // and the arrows and esc would stop reaching their handlers, so findTile shows the clipboard state instead
     @ViewBuilder
     private var tile: some View {
-        if mode == .note && !doOnboarding {
+        // prioritise the boolean values first as modes can override them
+        if showingCamera {
+            //            CameraView
+        } else if mode == .note && !doOnboarding {
             noteTile
+        } else if mode == .ivy && !doOnboarding {
+            ivyTile
         } else {
             findTile
         }
@@ -395,6 +495,13 @@ struct ContentView: View {
                     emoji: emoji,
                     animation: Onboarding.steps[onboardingStep].animation
                 )
+            } else if showingClipboardHistory {
+                Image(systemName: "list.bullet.clipboard")
+                    .font(.system(size: 46, weight: .light))
+                    .foregroundStyle(.primary)
+                    .frame(height: 84)
+                Text("Clipboard History")
+                    .font(.system(size: 16, weight: .medium))
             } else {
                 paneIcon
                 paneTitle
@@ -412,6 +519,163 @@ struct ContentView: View {
         return ZStack {
             shape.fill(selectionTint)
             shape.strokeBorder(Color.accentColor.opacity(0.45), lineWidth: 0.6)
+        }
+    }
+    
+    private var ivyTile: some View {
+        VStack(spacing: 0) {
+            chatHeader
+            chatHistory
+            chatBar
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+    
+    private var chatHeader: some View {
+        HStack(spacing: 6) {
+            Image("ray")
+            Text("Ivy")
+            Spacer()
+            if !chatMessages.isEmpty {
+                Button {
+                    withAnimation(Self.rowSpring) { chatMessages = [] }
+                    focused = true
+                } label: {
+                    Image(systemName: "square.and.pencil")
+                }
+//                .rayGlassButton()
+                .help("New chat")
+            }
+        }
+        .font(.system(size: 11, weight: .medium))
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 20)
+        .padding(.top, 20)
+        .background(.green)
+    }
+    
+    private var chatHistory: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                if chatMessages.isEmpty && !isReplying {
+                    VStack(spacing: 8) {
+                        Image(systemName: "sparkles")
+                            .font(.system(size: 34, weight: .light))
+                        Text("What's on your mind?")
+                            .font(.system(size: 14, weight: .medium))
+                    }
+                    .foregroundStyle(.tertiary)
+                    .frame(maxWidth: .infinity)
+                    .padding(.top, 90)
+                } else {
+                    LazyVStack(spacing: 8) {
+                        ForEach(chatMessages) { message in
+                            chatBubble(message)
+                                .id(message.id)
+                                .transition(.scale(scale: 0.94, anchor: message.role == .user ? .bottomTrailing : .bottomLeading)
+                                    .combined(with: .opacity))
+                        }
+                        if isReplying {
+                            typingIndicator.id("typing")
+                        }
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 8)
+                    .animation(Self.rowSpring, value: chatMessages)
+                }
+            }
+            .scrollIndicators(.never)
+            .onChange(of: chatMessages) { scrollToEnd(proxy) }
+            .onChange(of: isReplying) { scrollToEnd(proxy) }
+        }
+    }
+    
+    private func scrollToEnd(_ proxy: ScrollViewProxy) {
+        withAnimation(Self.selectionSpring) {
+            if isReplying { proxy.scrollTo("typing", anchor: .bottom) }
+            else if let last = chatMessages.last { proxy.scrollTo(last.id, anchor: .bottom) }
+        }
+    }
+    
+    private func chatBubble(_ message: ChatMessage) -> some View {
+        let mine = message.role == .user
+        return HStack {
+            if mine { Spacer(minLength: 48) }
+            Text(message.text)
+                .font(.system(size: 13.5))
+                .textSelection(.enabled)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .fill(mine ? Color.accentColor.opacity(0.35) : Color.white.opacity(0.09))
+                )
+            if !mine { Spacer(minLength: 48) }
+        }
+    }
+    
+    private var typingIndicator: some View {
+        HStack {
+            HStack(spacing: 4) {
+                ForEach(0..<3, id: \.self) { i in
+                    Circle()
+                        .fill(Color.secondary)
+                        .frame(width: 5, height: 5)
+                        .phaseAnimator([0.3, 1.0]) { dot, phase in
+                            dot.opacity(phase)
+                        } animation: { _ in .easeInOut(duration: 0.5).delay(Double(i) * 0.15) }
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 12)
+            .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(Color.white.opacity(0.09)))
+            Spacer()
+        }
+    }
+    
+    private var chatBar: some View {
+        let canSend = !trimmedQuery.isEmpty && !isReplying
+        
+        return HStack(spacing: 8) {
+            TextField(mode.prompt, text: $query, axis: .vertical)
+                .textFieldStyle(.plain)
+                .font(.system(size: 13.5))
+                .lineLimit(1...4)
+                .focused($focused)
+                .onSubmit { sendChat() }
+            
+            Button { sendChat() } label: {
+                Image(systemName: "arrow.up")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(canSend ? Color.white : Color.secondary)
+                    .frame(width: 24, height: 24)
+                    .background(Circle().fill(canSend ? Color.accentColor : Color.white.opacity(0.10)))
+            }
+            .buttonStyle(.plain)
+            .disabled(!canSend)
+            .animation(.snappy(duration: 0.15), value: canSend)
+        }
+        .padding(.leading, 16)
+        .padding(.trailing, 8)
+        .padding(.vertical, 8)
+        .background(Capsule().fill(Color.white.opacity(0.08)))
+        .overlay(Capsule().strokeBorder(Color.white.opacity(0.08), lineWidth: 0.5))
+        .padding(.horizontal, 14)
+        .padding(.bottom, 14)
+        .padding(.top, 4)
+    }
+    
+    private func sendChat() {
+        let text = trimmedQuery
+        guard !text.isEmpty, !isReplying else { return }
+        chatMessages.append(ChatMessage(role: .user, text: text))
+        query = ""
+        isReplying = true
+        
+        Task {
+            let reply = await ChatService.reply(to: chatMessages)
+            chatMessages.append(ChatMessage(role: .assistant, text: reply))
+            isReplying = false
         }
     }
     
@@ -725,27 +989,36 @@ struct ContentView: View {
                 onboardingContent
             } else {
                 dropdownHeader
-                
-                VStack(spacing: 1) {
-                    ForEach(Array(results.enumerated()), id: \.element.id) { i, item in
-                        row(item, index: i)
-                            .opacity(rowsRevealed ? 1 : 0)
-                            .offset(y: rowsRevealed ? 0 : -8)
-                            .animation(Self.rowSpring.delay(0.25 + Double(i) * 0.03), value: rowsRevealed) // For stagger
-                            // Swipe left reveals the trailing action (same as →), swipe right the leading one (same as ←)
-                            .swipeActions(edge: .trailing, allowsFullSwipe: !isApp(item)) { swipeButton(.trailing, item: item, index: i) }
-                            .swipeActions(edge: .leading, allowsFullSwipe: true) { swipeButton(.leading, item: item, index: i) }
-                    }
-                }
-                .padding(.horizontal, dropdownInset)
-                .padding(.bottom, dropdownInset)
-                .animation(Self.selectionSpring, value: selection)
-                .clipped()
+                dropdownContent
             }
         }
         .frame(width: 380)
         .modifier(GlassCard(radius: dropdownRadius))
         .glassEffectID("dropdown", in: glassNS)
+    }
+    
+    private var dropdownContent: some View {
+        VStack(spacing: 1) {
+            if results.isEmpty {
+                Text(showingClipboardHistory ? "Nothing copied yet" : "No results")
+                    .font(.system(size: 13))
+                    .foregroundStyle(.tertiary)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: rowHeight)
+            }
+            ForEach(Array(results.enumerated()), id: \.element.id) { i, item in
+                row(item, index: i)
+                    .opacity(rowsRevealed ? 1 : 0)
+                    .offset(y: rowsRevealed ? 0 : -8)
+                    .animation(Self.rowSpring.delay(0.25 + Double(i) * 0.03), value: rowsRevealed)
+                    .swipeActions(edge: .trailing, allowsFullSwipe: true) { swipeButton(.trailing, item: item, index: i) }
+                    .swipeActions(edge: .leading, allowsFullSwipe: true) { swipeButton(.leading, item: item, index: i) }
+            }
+        }
+        .padding(.horizontal, dropdownInset)
+        .padding(.bottom, dropdownInset)
+        .animation(Self.selectionSpring, value: selection)
+        .clipped()
     }
     
     private var onboardingContent: some View {
@@ -971,7 +1244,7 @@ struct ContentView: View {
     
     private var dropdownHeader: some View {
         HStack(spacing: 6) {
-            Text(query.isEmpty ? "Suggestions" : "\(results.count) results")
+            Text(showingClipboardHistory ? "Clipboard History" : (query.isEmpty ? "Suggestions" : "\(results.count) results"))
                 .font(.system(size: 11.5, weight: .semibold))
                 .foregroundStyle(.secondary)
             if !query.isEmpty {
@@ -1128,6 +1401,12 @@ struct ContentView: View {
         if mode == .note {
             return [PaneAction(title: "Save to \(noteDestination.title)", icon: "square.and.pencil", run: item.action)]
         }
+        if item.id.hasPrefix("clip:") { // a clipboard entry, copying it closes the launcher like any other action
+            return [PaneAction(title: "Copy", icon: "doc.on.doc", run: item.action)]
+        }
+        if item.id == "cmd:clipboard" { // opens inside the launcher, so it must not be hidden afterwards
+            return [PaneAction(title: "Open", icon: "list.bullet.clipboard", keepsOpen: true, run: item.action)]
+        }
         if item.id.hasPrefix("web:") {
             return [PaneAction(title: "Search", icon: "arrow.up.right", run: item.action)]
         }
@@ -1188,6 +1467,7 @@ struct ContentView: View {
     }
 
     private func handleDown() -> KeyPress.Result {
+        guard aliasTarget == nil else { return .handled } // the bubble is open, arrows belong to it
         completeTask(.arrows)
         if !dropdownVisible && results.count > 1 && mode != .calc {
             dropdownTask?.cancel()
@@ -1200,7 +1480,7 @@ struct ContentView: View {
 
     // MARK: Side actions
 
-    // Left and right on a row. Leading (←) is "Reveal in Finder", trailing (→) is "Open With…" for files and "Quit" for running apps
+    // Left and right on a row. Leading (←) is "Reveal in Finder", trailing (→) is "Open With…" for files and "Set Alias…" for apps and commands
     // The same actions back the swipe gestures, swiping left reveals the trailing one
     private enum Side { case leading, trailing }
 
@@ -1208,9 +1488,24 @@ struct ContentView: View {
         item.iconPath?.hasSuffix(".app") == true
     }
 
+    // → on apps and commands. Opens the speech bubble, the launcher stays up so you can see the alias work straight away
+    private func aliasAction(for item: Item, at index: Int?) -> SideAction {
+        SideAction(title: "Set Alias…", icon: "character.cursor.ibeam") {
+            openAliasBubble(for: item, row: dropdownVisible ? index : nil)
+        }
+    }
+
     // nil means this row has nothing for that arrow, so the key falls through and the swipe shows nothing
     private func sideAction(_ side: Side, for item: Item, at index: Int?) -> SideAction? {
-        guard mode == .find, !doOnboarding, let path = item.iconPath else { return nil } // web searches, calc and notes have none
+        guard mode == .find, !doOnboarding, !showingClipboardHistory else { return nil }
+
+        // Commands have no file path, so the only thing on offer is → Set Alias
+        if item.id.hasPrefix("cmd:") {
+            return side == .trailing ? aliasAction(for: item, at: index) : nil
+        }
+
+        // Web searches, calc, notes and clipboard rows have no path and get nothing
+        guard let path = item.iconPath else { return nil }
         let url = URL(fileURLWithPath: path)
 
         switch side {
@@ -1221,14 +1516,8 @@ struct ContentView: View {
             }
 
         case .trailing:
-            if isApp(item) {
-                // Only offered while the app is actually running, and never for Ray itself
-                guard runningPaths.contains(path), path != Bundle.main.bundleURL.path else { return nil }
-                return SideAction(title: "Quit", icon: "power") {
-                    hide()
-                    NSWorkspace.shared.runningApplications.first { $0.bundleURL?.path == path }?.terminate()
-                }
-            }
+            if isApp(item) { return aliasAction(for: item, at: index) }
+
             return SideAction(title: "Open With…", icon: "ellipsis.circle") {
                 // Next turn of the run loop, so the key press that started this is finished before the menu starts tracking
                 DispatchQueue.main.async {
@@ -1237,6 +1526,15 @@ struct ContentView: View {
                 }
             }
         }
+    }
+
+    private func quitSelectedApp() {
+        guard mode == .find, !doOnboarding, aliasTarget == nil, dropdownVisible, results.indices.contains(selection) else { return }
+        let item = results[selection]
+        guard isApp(item), let path = item.iconPath,
+              runningPaths.contains(path), path != Bundle.main.bundleURL.path else { return }
+        hide()
+        NSWorkspace.shared.runningApplications.first { $0.bundleURL?.path == path }?.terminate()
     }
 
     // A pop-up menu takes keyboard focus while it's open and the launcher doesn't always get it back
@@ -1265,9 +1563,9 @@ struct ContentView: View {
     }
 
     private func handleSide(_ side: Side) -> KeyPress.Result {
-        // Left and right only belong to us in Find mode, in Calc and Note they still move the text cursor
-        guard !doOnboarding, mode == .find, results.indices.contains(selection) else { return .ignored }
-        if query.isEmpty && !dropdownVisible { return .ignored }
+        guard aliasTarget == nil else { return .ignored }
+        guard !doOnboarding, !showingClipboardHistory, mode == .find,
+              dropdownVisible, results.indices.contains(selection) else { return .ignored }
         guard let action = sideAction(side, for: results[selection], at: selection) else { return .ignored }
         action.run()
         return .handled
@@ -1296,9 +1594,126 @@ struct ContentView: View {
         }
     }
 
+    private func openAliasBubble(for item: Item, row: Int?) {
+        aliasList = AliasStore.aliases(for: item.id)
+        aliasDraft = ""
+        aliasRow = row
+        withAnimation(.smooth(duration: 0.22)) {
+            aliasTarget = item
+            aliasContentIn = true
+        }
+        DispatchQueue.main.async { aliasFocused = true }
+    }
+
+    private func closeAliasBubble() {
+        guard aliasTarget != nil else { return }
+        withAnimation(.smooth(duration: 0.16)) {
+            aliasTarget = nil
+            aliasContentIn = false
+        }
+        aliasDraft = ""
+        refocus()
+    }
+
+    private func saveAlias() {
+        guard let item = aliasTarget else { return }
+        AliasStore.add(aliasDraft, to: item.id)
+        closeAliasBubble()
+    }
+
+    private var aliasBubble: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Alias for \(aliasTarget?.title ?? "")")
+                .font(.system(size: 11.5, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+            
+            TextField("e.g. ppt", text: $aliasDraft)
+                .textFieldStyle(.plain)
+                .font(.system(size: 13.5))
+                .focused($aliasFocused)
+                .onSubmit { saveAlias() }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(Capsule().fill(Color.white.opacity(0.10)))
+            
+            if !aliasList.isEmpty {
+                HStack(spacing: 4) {
+                    ForEach(aliasList, id: \.self) { alias in
+                        Button {
+                            if let item = aliasTarget {
+                                AliasStore.remove(alias, from: item.id)
+                                withAnimation(Self.rowSpring) { aliasList = AliasStore.aliases(for: item.id) }
+                            }
+                        } label: {
+                            HStack(spacing: 3) {
+                                Text(alias)
+                                Image(systemName: "xmark").font(.system(size: 7, weight: .bold))
+                            }
+                            .font(.system(size: 10.5, weight: .medium, design: .rounded))
+                            .padding(.horizontal, 6).padding(.vertical, 2)
+                            .background(Color.white.opacity(0.09), in: Capsule())
+                        }
+                        .buttonStyle(.plain)
+                        .help("Remove alias")
+                        .transition(.scale(scale: 0.7).combined(with: .opacity))
+                    }
+                }
+            }
+            
+            HStack(spacing: 10) {
+                HStack(spacing: 4) { keycap("↵"); Text("Save") }
+                HStack(spacing: 4) { keycap("esc"); Text("Cancel") }
+            }
+            .font(.system(size: 10.5))
+            .foregroundStyle(.tertiary)
+        }
+        .opacity(aliasContentIn ? 1 : 0) // only the contents fade, the glass morphs on its own
+        .padding(.leading, 14 + 12)      // + the tail width
+        .padding(.trailing, 14)
+        .padding(.vertical, 12)
+        .frame(width: 192, alignment: .leading)
+        .glassEffect(.regular.tint(Color.black.opacity(0.22)), in: BubbleShape())
+        .glassEffectID("aliasBubble", in: glassNS)
+        .glassEffectTransition(.matchedGeometry)
+        .overlay(BubbleShape().stroke(Color.white.opacity(0.14), lineWidth: 0.8))
+        .shadow(color: .black.opacity(0.3), radius: 12, y: 5)
+    }
+
+    // Placed so the arrow touches the trailing edge of the row, or of the launchpad when the map is closed
+    @ViewBuilder
+    private var aliasBubbleOverlay: some View {
+        if aliasTarget != nil {
+            let stageWidth = ivyTileSize.width + launcherPadding * 2
+            let barHeight: CGFloat = (showUtilityBar && isUpdateAvailable) ? 60 + 16 : 0
+            
+            let edgeWidth: CGFloat = (aliasRow != nil) ? 380 : launcherSize.width
+            let x = (stageWidth + edgeWidth) / 2 + 4
+            
+            let y: CGFloat = {
+                if let i = aliasRow {
+                    return barHeight + launcherSize.height + 16 + dropdownHeaderHeight
+                    + CGFloat(i) * (rowHeight + 1) + rowHeight / 2
+                }
+                return barHeight + launcherSize.height / 2
+            }()
+            
+            aliasBubble
+                .fixedSize(horizontal: false, vertical: true) // natural height
+                    .frame(height: 0, alignment: .center)         // a zero-height line, the bubble overflows it equally up and down
+                    .padding(.leading, x)
+                    .padding(.top, y)
+        }
+    }
+
     private func handleEscape() -> KeyPress.Result {
+        if aliasTarget != nil { closeAliasBubble(); return .handled } // the bubble goes first
         if doOnboarding { // esc skips the tour instead of closing Ray
             finishOnboarding()
+            return .handled
+        }
+        if showingClipboardHistory { // esc leaves clipboard history first, the next esc closes Ray as usual
+            showingClipboardHistory = false
             return .handled
         }
         if dropdownVisible {
@@ -1311,12 +1726,14 @@ struct ContentView: View {
 
     // Tab cycles modes, Shift-Tab goes back
     private func handleTab(_ press: KeyPress) -> KeyPress.Result {
+        guard aliasTarget == nil else { return .handled }
         step(press.modifiers.contains(.shift) ? -1 : 1)
         return .handled
     }
 
     // Backspace on an empty field drops you back to Find
     private func handleDelete() -> KeyPress.Result {
+        guard aliasTarget == nil else { return .ignored } // backspace edits the bubble's text
         guard query.isEmpty, mode != .find else { return .ignored }
         if mode == .note && !doOnboarding { stashNote() }
         mode = .find
@@ -1333,14 +1750,17 @@ struct ContentView: View {
     }
 
     private func step(_ d: Int) {
+        showingClipboardHistory = false // switching modes leaves clipboard history
         let all: [Mode] = Mode.allCases
         let next: Mode = all[(mode.rawValue + d + all.count) % all.count]
         if mode == .note && !doOnboarding { stashNote() }  // note text must not turn into a search
         if next == .note && !doOnboarding { query = "" }   // and search text must not turn into a note, the draft or destination content loads instead
+        if next == .ivy && !doOnboarding { query = "" }    // and search text must not turn into a chat message
         mode = next
     }
 
     private func move(_ d: Int) {
+        guard aliasTarget == nil else { return }
         if doOnboarding { // arrows still work, during the tour they count towards the "pick your result" page
             completeTask(.arrows)
             return
@@ -1361,7 +1781,7 @@ struct ContentView: View {
                 NSWorkspace.shared.openApplication(at: url, configuration: NSWorkspace.OpenConfiguration())
             })
         }
-        pool = items + [settingsItem, notesItem]
+        pool = items + [settingsItem, notesItem, cameraItem, clipboardHistoryItem]
         refresh()
     }
 
@@ -1369,6 +1789,20 @@ struct ContentView: View {
     private var settingsItem: Item {
         Item(id: "cmd:settings", title: "Ray Settings", icon: "gearshape", subtitle: "Command") {
             AppDelegate.openSettings()
+        }
+    }
+    
+    private var cameraItem: Item {
+        Item(id: "cmd:camera", title: "Open Camera", icon: "web.camera", subtitle: "Command") {
+            showingCamera = true
+        }
+    }
+    
+    // Opens inside the launcher instead of closing it, see keepsOpen in actions(for:)
+    private var clipboardHistoryItem: Item {
+        Item(id: "cmd:clipboard", title: "Show Clipboard History", icon: "list.bullet.clipboard", subtitle: "Command") {
+            query = "" // otherwise the search text stays in the hidden field
+            showingClipboardHistory = true
         }
     }
 
@@ -1402,6 +1836,7 @@ struct ContentView: View {
     // Typing again cancels the search that's still running, so old scans never pile up
     private func searchFiles(_ q: String) {
         fileSearchTask?.cancel()
+        guard !showingClipboardHistory else { return }
 
         // One letter matches almost every file, so the results would be noise and the scan is the most expensive one
         guard q.count >= 2, fileIndex.count > 0 else {
@@ -1463,7 +1898,43 @@ struct ContentView: View {
         }
     }
 
+    // The clipboard history as rows, filtered by whatever you type, capped at 7 so ⌘1-7 reach every row
+    // Files get their real icon and folder like Find results, images get a photo symbol and their size
+    private func clipboardItems() -> [Item] {
+        let q: String = trimmedQuery.lowercased()
+        let matches: [ClipEntry] = q.isEmpty ? clipboard.items : clipboard.items.filter { $0.searchText.lowercased().contains(q) }
+
+        return matches.prefix(7).enumerated().map { i, entry in
+            let id = "clip:\(i)"
+            let copy: () -> Void = { clipboard.copyToClipboard(entry) }
+
+            switch entry {
+            case .text(let text):
+                let line: String = text.split(whereSeparator: \.isNewline).first.map(String.init) ?? text
+                return Item(id: id, title: line.trimmingCharacters(in: .whitespaces), icon: "doc.on.clipboard", action: copy)
+
+            case .files(let urls):
+                let first: URL = urls[0]
+                let title: String = urls.count == 1 ? first.lastPathComponent : "\(first.lastPathComponent) + \(urls.count - 1) more"
+                let folder: String = (first.deletingLastPathComponent().path as NSString).abbreviatingWithTildeInPath
+                return Item(id: id, title: title, icon: "doc", subtitle: folder, iconPath: first.path, action: copy)
+
+            case .image(let data):
+                let size: String? = NSImage(data: data).map { "\(Int($0.size.width)) × \(Int($0.size.height))" }
+                return Item(id: id, title: "Image", icon: "photo", subtitle: size, action: copy)
+            }
+        }
+    }
+
     private func refresh() {
+        if showingClipboardHistory { // clipboard history replaces the Find results while it's open
+            fileSearchTask?.cancel()
+            filesPending = false
+            calcResult = nil
+            results = clipboardItems()
+            selection = min(selection, max(0, results.count - 1))
+            return
+        }
         let q: String = trimmedQuery
 
         switch mode {
@@ -1491,12 +1962,21 @@ struct ContentView: View {
             let body: String = query.trimmingCharacters(in: .whitespacesAndNewlines)
             results = body.isEmpty ? [] : [noteItem(query)]
             selection = 0
+            
+        default:
+            // Ivy (and camera) have no result list, clearing it keeps the map from opening with stale rows
+            fileSearchTask?.cancel()
+            filesPending = false
+            calcResult = nil
+            results = []
+            selection = 0
         }
     }
 
     // Find results are apps first, then files, then web search always last
     // preserveSelection keeps you on the same row when files arrive late, but only if you had moved off the top one
     private func recomputeFind(preserveSelection: Bool) {
+        guard !showingClipboardHistory else { return } // late file results must not overwrite the clipboard rows
         let q: String = trimmedQuery
         calcResult = nil
         let keepID: String? = results.indices.contains(selection) ? results[selection].id : nil
@@ -1553,6 +2033,7 @@ struct ContentView: View {
     }
 
     private func run(at i: Int) {
+        guard aliasTarget == nil else { return } // ⌘1-7 shouldn't launch things behind the bubble
         if doOnboarding {
             completeTask(.number)
             return
@@ -1575,7 +2056,9 @@ struct ContentView: View {
             noteDraftBase = ""
             query = ""
         }
-        hide()
+        if chosen?.keepsOpen != true { // actions like Clipboard History stay inside the launcher
+            hide()
+        }
         chosen?.run()
     }
 
@@ -1599,6 +2082,11 @@ struct ContentView: View {
             filesPending = false
             fileHits = []
             calcResult = nil
+            showingClipboardHistory = false
+            showingCamera = false
+            aliasTarget = nil
+            aliasDraft = ""
+            // chatMessages is left alone on purpose so the conversation survives closing, add `chatMessages = []` to start fresh each time
         }
         runningPaths = Set(NSWorkspace.shared.runningApplications.compactMap { $0.bundleURL?.path })
         focused = true
@@ -1612,4 +2100,4 @@ struct ContentView: View {
         focused = false
         DispatchQueue.main.async { focused = true }
     }
-}   
+}

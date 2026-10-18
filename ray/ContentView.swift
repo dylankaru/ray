@@ -551,7 +551,6 @@ struct ContentView: View {
         .foregroundStyle(.secondary)
         .padding(.horizontal, 20)
         .padding(.top, 20)
-        .background(.green)
     }
     
     private var chatHistory: some View {

@@ -13,20 +13,22 @@ import SwiftUI
  Quick terminology so I don't forget..
  Launchpad:      the rounded squircle that acts as the actual launcher
  Map:            the dropdown of related command options
- Option Command: the suggested/main action given in the launchpad
- Command Option: the suggested/list of actions given in the map
+ Command: the suggested/main action given in the launchpad
+ Option: the suggested/list of actions given in the map
+ 
+ v1.1: I've changed the consumer names because they seem pretty poorly named
+ 
  
  */
 
 // Mode is what the launcher is currently doing with what you type
 enum Mode: Int, CaseIterable {
-    case find, calc, note, ivy, camera
+    case find, calc, note
 
     var prompt: String {
         switch self {
         case .find: return "Search apps, files and the web"
         case .calc: return "Type an expression"
-        case .ivy:  return "Ask Ivy anything"
         default: return ""
         }
     }
@@ -57,24 +59,7 @@ struct SideAction {
     let run: () -> Void
 }
 
-// One message in the Ivy chat
-struct ChatMessage: Identifiable, Equatable {
-    enum Role { case user, assistant }
-    let id = UUID()
-    let role: Role
-    var text: String
-}
-
-// Stub, swap in your real Ivy backend
-enum ChatService {
-    static func reply(to history: [ChatMessage]) async -> String {
-        try? await Task.sleep(for: .seconds(1))
-        return "This is where Ivy's answer goes."
-    }
-}
-
-// The launchpad's three sizes, compact is the square, note and chat are wider so there's room to write
-enum TileLayout { case compact, note, chat }
+enum TileLayout { case compact, note, camera }
 
 // Different types of animations for the emoji that lives in the launchpad
 enum OnboardingEmojiAnimation {
@@ -94,6 +79,7 @@ struct OnboardingStep {
     var symbol: String? = nil
     let title: String
     let body: String
+    var note: String? = nil
     var keys: [String] = []
     var showsMarkerDemo: Bool = false
     var tasks: [OnboardingTask] = []
@@ -109,7 +95,8 @@ enum Onboarding {
                        body: "This is just an onboarding so you don't get lost, this won't take very long."),
         OnboardingStep(symbol: "keyboard",
                        title: "Summon it from anywhere",
-                       body: "Press these keys in any app. Click away or hit escape and it leaves.",
+                       body: "Ray is a launcher. You can use the below keybind to open it",
+                       note: "p.s. this keybind WILL be rebindable in settings in the future",
                        keys: ["⌥", "Space"]),
         OnboardingStep(symbol: "magnifyingglass",
                        title: "Just start typing",
@@ -131,7 +118,9 @@ enum Onboarding {
                        hint: "Try it, press ↓ or ⌘1"),
         OnboardingStep(symbol: "checkmark.circle",
                        title: "You're all set",
-                       body: "You can change anything later in Ray Settings. You can also replay the onboarding there."),
+                       body: "You can change anything later in Ray Settings. You can also replay the onboarding there.",
+                       note: "Hope you enjoy the launcher, I know that ",
+                      ),
     ]
 }
 
@@ -190,6 +179,8 @@ struct ContentView: View {
     @State private var showingClipboardHistory = false
     @State private var aliasContentIn: Bool = false // the bubble's contents fade in a beat after the bubble itself
     
+    private let cameraTileSize = CGSize(width: 560, height: 315) // 16:9, so nothing is cropped
+    
     @State private var query: String = ""
     @State private var mode: Mode = .find
     @State private var selection: Int = 0
@@ -213,8 +204,6 @@ struct ContentView: View {
     @State private var runningPaths: Set<String> = [] // Apps that are running right now, refreshed whenever the launcher opens
     @State private var loadedNote: String? = nil // The destination's content that was loaded into the editor, saving replaces it instead of adding it again
     @State private var tileLayout: TileLayout = .compact
-    @State private var chatMessages: [ChatMessage] = [] // The Ivy conversation, survives closing the launcher
-    @State private var isReplying: Bool = false
     
     @State private var aliasTarget: Item? = nil      // the item the bubble is for, nil = closed
     @State private var aliasRow: Int? = nil
@@ -238,7 +227,7 @@ struct ContentView: View {
     
     private let tileSize: CGFloat = 240
     private let noteTileSize = CGSize(width: 348, height: 252) // Note mode, wider than tall so there's room to write
-    private let ivyTileSize = CGSize(width: 650, height: 380) // Ivy mode, bigger than Note so a conversation fits
+    private var stageWidth: CGFloat { cameraTileSize.width + launcherPadding * 2 } // the widest tile sets the stage width
     private let rowHeight: CGFloat = 46
     private let launcherRadius: CGFloat = 50
     private let launcherPadding: CGFloat = 16
@@ -253,18 +242,13 @@ struct ContentView: View {
         mode == .note && !doOnboarding
     }
     
-    // True while the launchpad is the Ivy chat
-    private var isIvy: Bool {
-        mode == .ivy && !doOnboarding
-    }
-    
     // Size follows tileLayout, not the mode, because tileLayout is changed inside withAnimation (see the mode onChange)
     // An .animation modifier on the mode fought with the quick fade on mode and lost
     private var tileDimensions: CGSize {
         switch tileLayout {
         case .compact: return CGSize(width: tileSize, height: tileSize)
         case .note: return noteTileSize
-        case .chat: return ivyTileSize
+        case .camera: return cameraTileSize
         }
     }
     
@@ -282,8 +266,9 @@ struct ContentView: View {
     }
     
     private var dropdownVisible: Bool {
-        if showingClipboardHistory { return true } // clipboard history lives in the dropdown, so it stays open until you leave it
-        if doOnboarding { return showDropdown } // the tour opens the dropdown even though there's nothing to list
+        if showingClipboardHistory { return true }
+        if showingCamera { return false }
+        if doOnboarding { return showDropdown }
         return showDropdown && results.count > 1 && mode != .calc // If there is only one result what's the point of the dropdown
     }
     
@@ -315,17 +300,25 @@ struct ContentView: View {
                 if mode != .find { completeTask(.modeSwitch) }
                 if mode == .note && !doOnboarding && query.isEmpty {
                     if !noteDraft.isEmpty {
-                        loadedNote = noteDraftBase.isEmpty ? nil : noteDraftBase // set first, the save action captures it
-                        query = noteDraft                                        // an unsaved note comes back first
+                        loadedNote = noteDraftBase.isEmpty ? nil : noteDraftBase
+                        query = noteDraft
                     } else {
-                        loadDestinationContent()                                 // nothing unsaved, so show what's already there
+                        loadDestinationContent()
                     }
                 }
                 
-                withAnimation(Self.dropdownSpring) {
-                    tileLayout = isNote ? .note : (isIvy ? .chat : .compact)
+                withAnimation(Self.dropdownSpring) { tileLayout = targetLayout }
+                refocus()
+            }
+            .onChange(of: cameraSelected) { _, selected in
+                if selected {
+                    CameraSession.shared.start()
+                } else if !showingCamera {
+                    CameraSession.shared.stop(after: 1.5)
                 }
-                refocus() // the editor and chat bar are different views from the search field, so focus has to move
+            }
+            .onChange(of: showingCamera) {
+                withAnimation(Self.dropdownSpring) { tileLayout = targetLayout }
             }
             .onChange(of: selection) { actionIndex = 0; closeAliasBubble() }
             .onChange(of: showingClipboardHistory) { refresh(); scheduleDropdown() } // swaps results between Find and the clipboard
@@ -404,8 +397,8 @@ struct ContentView: View {
                     dropdown // Map
                 }
             }
-            .frame(width: ivyTileSize.width + launcherPadding * 2, alignment: .top) // constant, widest launchpad. A width that animates makes NSHostingView re-run window size constraints forever (crash)
-            .overlay(alignment: .topLeading) { aliasBubbleOverlay } // the alias speech bubble, drawn inside the panel so it works over full-screen apps
+            .frame(width: stageWidth, alignment: .top)
+            .overlay(alignment: .topLeading) { aliasBubbleOverlay }
         }
         .animation(Self.dropdownSpring, value: dropdownVisible)
         .animation(.smooth(duration: 0.16), value: mode)
@@ -464,8 +457,17 @@ struct ContentView: View {
     
     private var launcher: some View {
         tile
-            .frame(width: tileDimensions.width, height: tileDimensions.height) // the same animated size the glass uses
-            .background(tileBackground) // the inner rect lives here, not inside the tiles, so it never snaps ahead of the glass
+            .frame(width: tileDimensions.width, height: tileDimensions.height)
+            .overlay {
+                if showingCamera {
+                    CameraTile()
+                        .frame(width: cameraTileSize.width, height: cameraTileSize.height) // always laid out at full size
+                        .frame(width: tileDimensions.width, height: tileDimensions.height) // the animated window onto it
+                        .clipShape(RoundedRectangle(cornerRadius: tileRadius, style: .continuous))
+                        .transition(.opacity)
+                }
+            }
+            .background(tileBackground)
             .padding(launcherPadding)
             .frame(width: launcherSize.width, height: launcherSize.height)
             .modifier(GlassCard(radius: launcherRadius))
@@ -476,13 +478,8 @@ struct ContentView: View {
     // and the arrows and esc would stop reaching their handlers, so findTile shows the clipboard state instead
     @ViewBuilder
     private var tile: some View {
-        // prioritise the boolean values first as modes can override them
-        if showingCamera {
-            //            CameraView
-        } else if mode == .note && !doOnboarding {
+        if mode == .note && !doOnboarding {
             noteTile
-        } else if mode == .ivy && !doOnboarding {
-            ivyTile
         } else {
             findTile
         }
@@ -509,7 +506,7 @@ struct ContentView: View {
         }
         .padding(.horizontal, 16)
         .frame(width: tileSize, height: tileSize, alignment: .center)
-        .overlay(alignment: .bottom) { tileBottom } // an overlay never changes the tile's size
+        .overlay(alignment: .bottom) { tileBottom }
     }
     
     // Fill and outline share one radius, strokeBorder keeps the outline inside the shape
@@ -519,162 +516,6 @@ struct ContentView: View {
         return ZStack {
             shape.fill(selectionTint)
             shape.strokeBorder(Color.accentColor.opacity(0.45), lineWidth: 0.6)
-        }
-    }
-    
-    private var ivyTile: some View {
-        VStack(spacing: 0) {
-            chatHeader
-            chatHistory
-            chatBar
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-    
-    private var chatHeader: some View {
-        HStack(spacing: 6) {
-            Image("ray")
-            Text("Ivy")
-            Spacer()
-            if !chatMessages.isEmpty {
-                Button {
-                    withAnimation(Self.rowSpring) { chatMessages = [] }
-                    focused = true
-                } label: {
-                    Image(systemName: "square.and.pencil")
-                }
-//                .rayGlassButton()
-                .help("New chat")
-            }
-        }
-        .font(.system(size: 11, weight: .medium))
-        .foregroundStyle(.secondary)
-        .padding(.horizontal, 20)
-        .padding(.top, 20)
-    }
-    
-    private var chatHistory: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                if chatMessages.isEmpty && !isReplying {
-                    VStack(spacing: 8) {
-                        Image(systemName: "sparkles")
-                            .font(.system(size: 34, weight: .light))
-                        Text("What's on your mind?")
-                            .font(.system(size: 14, weight: .medium))
-                    }
-                    .foregroundStyle(.tertiary)
-                    .frame(maxWidth: .infinity)
-                    .padding(.top, 90)
-                } else {
-                    LazyVStack(spacing: 8) {
-                        ForEach(chatMessages) { message in
-                            chatBubble(message)
-                                .id(message.id)
-                                .transition(.scale(scale: 0.94, anchor: message.role == .user ? .bottomTrailing : .bottomLeading)
-                                    .combined(with: .opacity))
-                        }
-                        if isReplying {
-                            typingIndicator.id("typing")
-                        }
-                    }
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 8)
-                    .animation(Self.rowSpring, value: chatMessages)
-                }
-            }
-            .scrollIndicators(.never)
-            .onChange(of: chatMessages) { scrollToEnd(proxy) }
-            .onChange(of: isReplying) { scrollToEnd(proxy) }
-        }
-    }
-    
-    private func scrollToEnd(_ proxy: ScrollViewProxy) {
-        withAnimation(Self.selectionSpring) {
-            if isReplying { proxy.scrollTo("typing", anchor: .bottom) }
-            else if let last = chatMessages.last { proxy.scrollTo(last.id, anchor: .bottom) }
-        }
-    }
-    
-    private func chatBubble(_ message: ChatMessage) -> some View {
-        let mine = message.role == .user
-        return HStack {
-            if mine { Spacer(minLength: 48) }
-            Text(message.text)
-                .font(.system(size: 13.5))
-                .textSelection(.enabled)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
-                .background(
-                    RoundedRectangle(cornerRadius: 16, style: .continuous)
-                        .fill(mine ? Color.accentColor.opacity(0.35) : Color.white.opacity(0.09))
-                )
-            if !mine { Spacer(minLength: 48) }
-        }
-    }
-    
-    private var typingIndicator: some View {
-        HStack {
-            HStack(spacing: 4) {
-                ForEach(0..<3, id: \.self) { i in
-                    Circle()
-                        .fill(Color.secondary)
-                        .frame(width: 5, height: 5)
-                        .phaseAnimator([0.3, 1.0]) { dot, phase in
-                            dot.opacity(phase)
-                        } animation: { _ in .easeInOut(duration: 0.5).delay(Double(i) * 0.15) }
-                }
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 12)
-            .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(Color.white.opacity(0.09)))
-            Spacer()
-        }
-    }
-    
-    private var chatBar: some View {
-        let canSend = !trimmedQuery.isEmpty && !isReplying
-        
-        return HStack(spacing: 8) {
-            TextField(mode.prompt, text: $query, axis: .vertical)
-                .textFieldStyle(.plain)
-                .font(.system(size: 13.5))
-                .lineLimit(1...4)
-                .focused($focused)
-                .onSubmit { sendChat() }
-            
-            Button { sendChat() } label: {
-                Image(systemName: "arrow.up")
-                    .font(.system(size: 11, weight: .bold))
-                    .foregroundStyle(canSend ? Color.white : Color.secondary)
-                    .frame(width: 24, height: 24)
-                    .background(Circle().fill(canSend ? Color.accentColor : Color.white.opacity(0.10)))
-            }
-            .buttonStyle(.plain)
-            .disabled(!canSend)
-            .animation(.snappy(duration: 0.15), value: canSend)
-        }
-        .padding(.leading, 16)
-        .padding(.trailing, 8)
-        .padding(.vertical, 8)
-        .background(Capsule().fill(Color.white.opacity(0.08)))
-        .overlay(Capsule().strokeBorder(Color.white.opacity(0.08), lineWidth: 0.5))
-        .padding(.horizontal, 14)
-        .padding(.bottom, 14)
-        .padding(.top, 4)
-    }
-    
-    private func sendChat() {
-        let text = trimmedQuery
-        guard !text.isEmpty, !isReplying else { return }
-        chatMessages.append(ChatMessage(role: .user, text: text))
-        query = ""
-        isReplying = true
-        
-        Task {
-            let reply = await ChatService.reply(to: chatMessages)
-            chatMessages.append(ChatMessage(role: .assistant, text: reply))
-            isReplying = false
         }
     }
     
@@ -735,6 +576,7 @@ struct ContentView: View {
         "I'm the brightest tool in the shed",
         "Type away",
         "He loves using Claude to generate questions for Gemini",
+        "Pro Tip: Get Claude Pro"
     ]
 
     private var noteEditor: some View {
@@ -1058,6 +900,13 @@ struct ContentView: View {
                 }
                 .padding(.top, 4)
             }
+            
+            Text (step.note ?? "")
+                .font(.system(size: 8))
+                .monospaced()
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .fixedSize(horizontal: false, vertical: true)
             
             if step.showsMarkerDemo {
                 markerDemo
@@ -1400,14 +1249,17 @@ struct ContentView: View {
         if mode == .note {
             return [PaneAction(title: "Save to \(noteDestination.title)", icon: "square.and.pencil", run: item.action)]
         }
-        if item.id.hasPrefix("clip:") { // a clipboard entry, copying it closes the launcher like any other action
+        if item.id.hasPrefix("clip:") {
             return [PaneAction(title: "Copy", icon: "doc.on.doc", run: item.action)]
         }
-        if item.id == "cmd:clipboard" { // opens inside the launcher, so it must not be hidden afterwards
+        if item.id == "cmd:clipboard" {
             return [PaneAction(title: "Open", icon: "list.bullet.clipboard", keepsOpen: true, run: item.action)]
         }
         if item.id.hasPrefix("web:") {
             return [PaneAction(title: "Search", icon: "arrow.up.right", run: item.action)]
+        }
+        if item.id == "cmd:camera" {
+            return [PaneAction(title: "Open", icon: "web.camera", keepsOpen: true, run: item.action)]
         }
         if let path = item.iconPath {
             let url = URL(fileURLWithPath: path)
@@ -1475,6 +1327,11 @@ struct ContentView: View {
             move(1)
         }
         return .handled
+    }
+    
+    private var targetLayout: TileLayout {
+        if showingCamera { return .camera }
+        return isNote ? .note : .compact
     }
 
     // MARK: Side actions
@@ -1683,7 +1540,6 @@ struct ContentView: View {
     @ViewBuilder
     private var aliasBubbleOverlay: some View {
         if aliasTarget != nil {
-            let stageWidth = ivyTileSize.width + launcherPadding * 2
             let barHeight: CGFloat = (showUtilityBar && isUpdateAvailable) ? 60 + 16 : 0
             
             let edgeWidth: CGFloat = (aliasRow != nil) ? 380 : launcherSize.width
@@ -1705,6 +1561,12 @@ struct ContentView: View {
         }
     }
 
+    private var cameraSelected: Bool {
+        mode == .find && !showingCamera
+            && results.indices.contains(selection)
+            && results[selection].id == "cmd:camera"
+    }
+    
     private func handleEscape() -> KeyPress.Result {
         if aliasTarget != nil { closeAliasBubble(); return .handled } // the bubble goes first
         if doOnboarding { // esc skips the tour instead of closing Ray
@@ -1720,6 +1582,7 @@ struct ContentView: View {
         } else {
             hide()
         }
+        if showingCamera { showingCamera = false; return .handled }
         return .handled
     }
 
@@ -1749,12 +1612,12 @@ struct ContentView: View {
     }
 
     private func step(_ d: Int) {
-        showingClipboardHistory = false // switching modes leaves clipboard history
+        showingClipboardHistory = false
+        showingCamera = false
         let all: [Mode] = Mode.allCases
         let next: Mode = all[(mode.rawValue + d + all.count) % all.count]
         if mode == .note && !doOnboarding { stashNote() }  // note text must not turn into a search
         if next == .note && !doOnboarding { query = "" }   // and search text must not turn into a note, the draft or destination content loads instead
-        if next == .ivy && !doOnboarding { query = "" }    // and search text must not turn into a chat message
         mode = next
     }
 
@@ -1793,14 +1656,19 @@ struct ContentView: View {
     
     private var cameraItem: Item {
         Item(id: "cmd:camera", title: "Open Camera", icon: "web.camera", subtitle: "Command") {
-            showingCamera = true
+            CameraSession.shared.start()
+            query = ""
+            closeDropdown()
+            withAnimation(Self.dropdownSpring) {
+                showingCamera = true
+                tileLayout = .camera
+            }
         }
     }
     
-    // Opens inside the launcher instead of closing it, see keepsOpen in actions(for:)
     private var clipboardHistoryItem: Item {
         Item(id: "cmd:clipboard", title: "Show Clipboard History", icon: "list.bullet.clipboard", subtitle: "Command") {
-            query = "" // otherwise the search text stays in the hidden field
+            query = ""
             showingClipboardHistory = true
         }
     }
@@ -1963,7 +1831,7 @@ struct ContentView: View {
             selection = 0
             
         default:
-            // Ivy (and camera) have no result list, clearing it keeps the map from opening with stale rows
+            // Camera has no result list, clearing it keeps the map from opening with stale rows
             fileSearchTask?.cancel()
             filesPending = false
             calcResult = nil
@@ -2072,6 +1940,7 @@ struct ContentView: View {
         var t = Transaction(animation: nil)
         t.disablesAnimations = true
         withTransaction(t) {
+            tileLayout = .compact
             closeDropdown()
             query = ""
             mode = .find
@@ -2085,7 +1954,6 @@ struct ContentView: View {
             showingCamera = false
             aliasTarget = nil
             aliasDraft = ""
-            // chatMessages is left alone on purpose so the conversation survives closing, add `chatMessages = []` to start fresh each time
         }
         runningPaths = Set(NSWorkspace.shared.runningApplications.compactMap { $0.bundleURL?.path })
         focused = true

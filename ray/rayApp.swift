@@ -21,9 +21,6 @@ struct rayApp: App {
 // TODO: make the notes waaay better
 // TODO: improve the expansion appear/disappear animation
 // TODO: add camera module
-// TODO: make ray update checks auto (liek when new app installed it cant see it yet) DOING
 // TODO: make the dropdown more customisable or add a mini dashboard
 // TODO: --> as in make it so that they can get quick stats to glance like maybe a friends birthday is tday or smth
-// TODO: improve performance (90mb of ram is a lot, and 7% cpu)
-// TODO: make the fuzzy search less fuzzy, like 'open' shouldnt show microsoft powerpoint
-// TODO: also fix first launch bug too where i cannot stype
+// TODO: make the animations expansion consistent

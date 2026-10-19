@@ -24,6 +24,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panel = LauncherPanel(rootView: ContentView())
         HotKey.register { [weak self] in self?.togglePanel() }
         setUpMenuBar()
+        CameraSession.shared.prepare()
 
         NotificationCenter.default.addObserver(self,
                                                selector: #selector(windowWillClose(_:)),

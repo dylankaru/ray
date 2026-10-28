@@ -49,32 +49,36 @@ struct BirthdayEntry: Codable, Identifiable, Hashable {
 @Observable @MainActor
 final class UtilityBarManager {
     static let shared = UtilityBarManager()
-
+    
+    private let utilityBarKey = "ray_show_utility_bar"
+    
     struct Update {
         let version: String
         let url: URL?
         let isForced: Bool
     }
-
+    
     private struct CachedUpdate: Codable {
         let version: String
         let url: URL?
         let isForced: Bool
     }
-
+    
     private(set) var update: Update?
     private(set) var entries: [BirthdayEntry] = []
-
+    
     var todaysBirthdays: [BirthdayEntry] { entries.filter { $0.daysUntil == 0 } }
-
+    
     // Not sure if forced updates should be a thing tbh, but if they do exist they defo should supercede birthdays
     // in render priority, still need to think about that tho
     var state: UtilityBarStates? {
-//        if update?.isForced == true { return .update } :/
+        //        if update?.isForced == true { return .update } :/
         if !todaysBirthdays.isEmpty { return .birthday }
         if update != nil { return .update }
         return nil
     }
+    
+    var isVisible: Bool { state != nil }
 
     @ObservationIgnored private var task: Task<Void, Never>?
     @ObservationIgnored private let cacheKey = "ray_cached_update"
@@ -104,7 +108,7 @@ final class UtilityBarManager {
 
     func checkForUpdate() async {
         #if DEBUG // THIS IS JUST FOR TESTING, its lwk annyoing coz its always there but i might comment it out soon so :)
-//        update = Update(version: "9.9.9", url: UpdateConfig.githubRepoLink, isForced: true)
+        update = Update(version: "9.9.9", url: UpdateConfig.githubRepoLink, isForced: true)
         // i commented it out
         #else
         if case let .updateAvailable(version, url, isForced) = await AppUpdateChecker.shared.checkAppUpdate() {

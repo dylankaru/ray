@@ -32,20 +32,24 @@ extension View {
     }
     
     @ViewBuilder
-    public func rayGlassContainer<Content: View>(@ViewBuilder content: () -> Content) -> some View {
+    public func RayGlassContainer<Content: View>(spacing: CGFloat, @ContentBuilder content: () -> Content) -> some View {
         if #available(macOS 26, *) {
-            GlassEffectContainer {
+            GlassEffectContainer(spacing: spacing) {
                 content()
             }
         } else {
-            content()
+            Group() {
+                VStack(spacing: spacing) {
+                    content()
+                }
+            }
         }
     }
     
     @ViewBuilder
-    public func rayGlassEffectID<ID: Hashable, S: Shape>(_ id: ID, in shape: S) -> some View {
+    public func rayGlassEffectID<ID: Hashable>(_ id: ID, in namespace: Namespace.ID) -> some View {
         if #available(macOS 26, *) {
-//            self.glassEffectID(id, in: shape)
+            self.glassEffectID(id, in: namespace)
         } else {
             self
         }
@@ -72,6 +76,16 @@ extension View {
             }
         } else {
             self.pickerStyle(.menu)
+        }
+    }
+    
+    @ViewBuilder
+    public func rayGlassEffectTransition(_ transitionID: Int) -> some View {
+        if #available(macOS 26.0, *) {
+            let transitionToUse: GlassEffectTransition = (transitionID == 1) ? .matchedGeometry : .materialize
+            self.glassEffectTransition(transitionToUse)
+        } else {
+            self
         }
     }
 }

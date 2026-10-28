@@ -17,7 +17,7 @@ extension Notification.Name {
 
 final class LauncherPanel: NSPanel {
     static let size = NSSize(width: 2000, height: 910)
-
+    
     init<V: View>(rootView: V) {
         super.init(
             contentRect: NSRect(origin: .zero, size: Self.size),
@@ -26,13 +26,13 @@ final class LauncherPanel: NSPanel {
             defer: false
         )
         isFloatingPanel = true
-        level = .modalPanel // used to be screensaver, modal panel seems to work fine too tho so idk, but this isnt a big thing
+        level = .screenSaver // nvm couldn't see it in fullscreen apps :/
         isOpaque = false
         backgroundColor = .clear
         hasShadow = false
         animationBehavior = .none
         collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
-
+        
         let hosting = NSHostingView(rootView: rootView)
         hosting.sizingOptions = [] // the hosting view never drives the window size
         contentView = hosting
@@ -44,25 +44,26 @@ final class LauncherPanel: NSPanel {
         hosting.autoresizingMask = [.width, .height]
         container.addSubview(hosting)
         contentView = container
-
+        
         contentMinSize = Self.size
         contentMaxSize = Self.size
+        observeBar()
     }
-
+    
     override var canBecomeKey: Bool { true }
-
+    
     var pinned = false
-
+    
     override func resignKey() {
         super.resignKey()
         if !pinned { orderOut(nil) }
     }
-
+    
     override func orderOut(_ sender: Any?) {
         super.orderOut(sender)
         NotificationCenter.default.post(name: .rayReset, object: nil)
     }
-
+    
     // The system is not allowed to nudge the panel back onto the screen
     override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect {
         frameRect
@@ -75,7 +76,7 @@ final class LauncherPanel: NSPanel {
         }
         super.noResponder(for: eventSelector)
     }
-
+    
     override func sendEvent(_ event: NSEvent) {
         if (event.type == .leftMouseDown || event.type == .rightMouseDown), !isKeyWindow {
             makeKeyAndOrderFront(nil)
@@ -83,27 +84,38 @@ final class LauncherPanel: NSPanel {
         super.sendEvent(event)
         // There's a swiftui error i have no idea how to fix
         // Some sort of quality of service thing
+        // and sometimes it doesnt show up so idek :/
     }
     
     override func setFrame(_ frameRect: NSRect, display flag: Bool) {
         super.setFrame(NSRect(origin: frameRect.origin, size: Self.size), display: flag)
     }
-
+    
     func positionOnActiveScreen() {
         let mouse = NSEvent.mouseLocation
         let screen = NSScreen.screens.first { NSMouseInRect(mouse, $0.frame, false) }
-            ?? NSScreen.main ?? NSScreen.screens[0]
-
+        ?? NSScreen.main ?? NSScreen.screens[0]
+        
         let full = screen.frame
         let visible = screen.visibleFrame
         let size = Self.size
-
-        let showUtilityBar = UserDefaults.standard.object(forKey: "ray_show_utility_bar") as? Bool ?? true
-        let yOffset: CGFloat = showUtilityBar ? 0 : -50
-
+        
+        let yOffset: CGFloat = UtilityBarManager.shared.isVisible ? 0 : 50
+        
         let origin = NSPoint(x: full.midX - size.width / 2,
-                             y: visible.midY - size.height / 2 + yOffset)
-
+                             y: visible.midY - size.height / 2 - yOffset)
+        
         setFrame(NSRect(origin: origin, size: size), display: false)
+    }
+    
+    func observeBar() {
+        withObservationTracking {
+            _ = UtilityBarManager.shared.isVisible
+        } onChange: { [weak self] in
+            Task { @MainActor [weak self] in
+                self?.positionOnActiveScreen()
+                self?.observeBar()
+            }
+        }
     }
 }

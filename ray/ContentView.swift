@@ -186,7 +186,6 @@ struct ContentView: View {
     @AppStorage("ray_note_draft_base") private var noteDraftBase: String = "" // What a draft was edited from, if anything
     @AppStorage("ray_marker_colour") private var markerColour: MarkerColour = .yellow
     @AppStorage("ray_marker_weight") private var markerWeight: MarkerBoldness = .verybold
-    @AppStorage("ray_show_utility_bar") var showUtilityBar = true
     @AppStorage("ray_custom_tint") private var customTint: RayThemes = .black
     @AppStorage("ray_tint_strength") private var tintStrength: Double = 0.4
     
@@ -194,7 +193,7 @@ struct ContentView: View {
     @State private var showingClipboardHistory = false
     @State private var aliasContentIn: Bool = false // the bubble's contents fade in a beat after the bubble itself
     
-    private let cameraTileSize = CGSize(width: 560, height: 315) // 16:9, so nothing is cropped
+    private let cameraTileSize = CGSize(width: 560, height: 315)
     
     @State private var query: String = ""
     @State private var mode: Mode = .find
@@ -249,7 +248,7 @@ struct ContentView: View {
     private let dropdownRadius: CGFloat = 28
     private let dropdownInset: CGFloat = 8
     private let dropdownHeaderHeight: CGFloat = 36
-    
+    private var showUtilityBar: Bool { UtilityBarManager.shared.isVisible }
     
     private var selectionTint: Color {
         if customTint.colour == .white && tintStrength >= 0.3 {
@@ -386,7 +385,7 @@ struct ContentView: View {
     
     // This is the raydar, launchpad and map
     private var stage: some View {
-        GlassEffectContainer(spacing: 16) {
+        RayGlassContainer(spacing: 16) {
             VStack(spacing: 16) {
                 if let state = bar.state, showUtilityBar || bar.update?.isForced == true {
                     utilityBar {
@@ -414,7 +413,7 @@ struct ContentView: View {
         }
         .frame(width: 380, height: 60)
         .modifier(GlassCard(radius: dropdownRadius))
-        .glassEffectID("utilityBar", in: glassNS)
+        .rayGlassEffectID("utilityBar", in: glassNS)
     }
     
     // For a user to choose different options in the dropdown
@@ -454,7 +453,7 @@ struct ContentView: View {
             .padding(launcherPadding)
             .frame(width: launcherSize.width, height: launcherSize.height)
             .modifier(GlassCard(radius: launcherRadius))
-            .glassEffectID("launcher", in: glassNS)
+            .rayGlassEffectID("launcher", in: glassNS)
     }
     
     // The clipboard isn't a branch here on purpose, swapping the tile out would remove the hidden text field
@@ -819,7 +818,7 @@ struct ContentView: View {
         }
         .frame(width: 380)
         .modifier(GlassCard(radius: dropdownRadius))
-        .glassEffectID("dropdown", in: glassNS)
+        .rayGlassEffectID("dropdown", in: glassNS)
     }
     
     private var dropdownContent: some View {
@@ -1522,9 +1521,9 @@ struct ContentView: View {
         .padding(.trailing, 14)
         .padding(.vertical, 12)
         .frame(width: 192, alignment: .leading)
-        .glassEffect(.regular.tint(Color.black.opacity(0.22)), in: BubbleShape())
-        .glassEffectID("aliasBubble", in: glassNS)
-        .glassEffectTransition(.matchedGeometry)
+        .rayGlassEffect(Color.black.opacity(0.22), in: BubbleShape())
+        .rayGlassEffectID("aliasBubble", in: glassNS)
+        .rayGlassEffectTransition(1) // matchedGeometry
         .overlay(BubbleShape().stroke(Color.white.opacity(0.14), lineWidth: 0.8))
         .shadow(color: .black.opacity(0.3), radius: 12, y: 5)
     }

@@ -17,10 +17,9 @@ struct rayApp: App {
         Settings { EmptyView() }
     }
 }
- 
-// TODO: make the notes waaay better
-// TODO: improve the expansion appear/disappear animation
-// TODO: add camera module
+
 // TODO: make the dropdown more customisable or add a mini dashboard
 // TODO: --> as in make it so that they can get quick stats to glance like maybe a friends birthday is tday or smth
-// TODO: make the animations expansion consistent
+// TODO: praj said to add animations to spawning and despawning the bag
+// TODO: add emoji thing and maybe even emoji kitchen to that too, that would be aura
+// TODO: maybe more tints too?

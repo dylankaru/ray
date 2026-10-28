@@ -61,13 +61,17 @@ extension View {
     }
     
     @ViewBuilder
-    public func rayTabs() -> some View {
-        if #available(macOS 27, *) {
-            self.pickerStyle(.tabs)
-        } else if #available(macOS 26, *) {
-            self.pickerStyle(.menu)
+    public func rayTabs(forceMenu: Bool = false) -> some View {
+        if !forceMenu {
+            if #available(macOS 27, *) {
+                self.pickerStyle(.tabs)
+            } else if #available(macOS 26, *) {
+                self.pickerStyle(.menu)
+            } else {
+                self.pickerStyle(.segmented)
+            }
         } else {
-            self.pickerStyle(.segmented)
+            self.pickerStyle(.menu)
         }
     }
 }

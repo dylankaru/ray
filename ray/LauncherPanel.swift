@@ -9,9 +9,9 @@ import AppKit
 import SwiftUI
 
 extension Notification.Name {
-    // Posted when the launcher shows or hides. ContentView wipes its state.
+    // Posted when the launcher shows or hides. ContentView wipes its state
     static let rayReset = Notification.Name("ray.reset")
-    // Asks ContentView to (re)focus its text field once the panel is really key.
+    // Asks ContentView to focus and refocus its text field once the panel is really key
     static let rayFocus = Notification.Name("ray.focus")
 }
 
@@ -26,7 +26,7 @@ final class LauncherPanel: NSPanel {
             defer: false
         )
         isFloatingPanel = true
-        level = .screenSaver
+        level = .modalPanel // used to be screensaver, modal panel seems to work fine too tho so idk, but this isnt a big thing
         isOpaque = false
         backgroundColor = .clear
         hasShadow = false
@@ -36,6 +36,14 @@ final class LauncherPanel: NSPanel {
         let hosting = NSHostingView(rootView: rootView)
         hosting.sizingOptions = [] // the hosting view never drives the window size
         contentView = hosting
+        
+        // when trying to reopen the camera there was a bug that caused the whole app to crash due to stacking of passed constraints
+        // so this just makes it so that hosting view isn't the window's content view
+        let container = NSView(frame: NSRect(origin: .zero, size: Self.size))
+        hosting.frame = container.bounds
+        hosting.autoresizingMask = [.width, .height]
+        container.addSubview(hosting)
+        contentView = container
 
         contentMinSize = Self.size
         contentMaxSize = Self.size
@@ -43,10 +51,9 @@ final class LauncherPanel: NSPanel {
 
     override var canBecomeKey: Bool { true }
 
-    /// In app mode the launcher stays up when you click away.
     var pinned = false
 
-    override func resignKey() {        // click away = hide
+    override func resignKey() {
         super.resignKey()
         if !pinned { orderOut(nil) }
     }
@@ -74,6 +81,12 @@ final class LauncherPanel: NSPanel {
             makeKeyAndOrderFront(nil)
         }
         super.sendEvent(event)
+        // There's a swiftui error i have no idea how to fix
+        // Some sort of quality of service thing
+    }
+    
+    override func setFrame(_ frameRect: NSRect, display flag: Bool) {
+        super.setFrame(NSRect(origin: frameRect.origin, size: Self.size), display: flag)
     }
 
     func positionOnActiveScreen() {
@@ -85,9 +98,11 @@ final class LauncherPanel: NSPanel {
         let visible = screen.visibleFrame
         let size = Self.size
 
-        // Centred horizontally on the whole screen and vertically in the area below the menu bar
+        let showUtilityBar = UserDefaults.standard.object(forKey: "ray_show_utility_bar") as? Bool ?? true
+        let yOffset: CGFloat = showUtilityBar ? 0 : -50
+
         let origin = NSPoint(x: full.midX - size.width / 2,
-                             y: visible.midY - size.height / 2)
+                             y: visible.midY - size.height / 2 + yOffset)
 
         setFrame(NSRect(origin: origin, size: size), display: false)
     }

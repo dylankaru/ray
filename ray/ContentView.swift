@@ -11,14 +11,21 @@ import SwiftUI
 /*
  
  Quick terminology so I don't forget..
- Launchpad:      the rounded squircle that acts as the actual launcher
- Map:            the dropdown of related command options
- Command: the suggested/main action given in the launchpad
- Option: the suggested/list of actions given in the map
+ Launchpad: the rounded squircle that acts as the actual launcher
+ Map:       the dropdown of related command options
+ Raydar:    the capsule on top of the launchpad
+ Bag:       the term that refers to the entire launcher, so the launchpad, map, and raydar all at the same time
+ Trigger:   the suggested/main action given in the launchpad
+ Option:    a suggested in the list of given possible actions in the map
  
- v1.1: I've changed the consumer names because they seem pretty poorly named
+ v1.1:
+ >  I've changed the consumer names because they seem pretty poorly named
  
- 
+ v1.2:
+ > I think ill start updating this big chunk of commands because it helps me remember what to write in the devlogs
+ > Ive added a bunch of stuff in no particular order: tint, strength of tint, motion intensity controls, basic keybind remapping
+ > camera item
+ > Also added a birthday ting
  */
 
 // Mode is what the launcher is currently doing with what you type
@@ -96,7 +103,7 @@ enum Onboarding {
         OnboardingStep(symbol: "keyboard",
                        title: "Summon it from anywhere",
                        body: "Ray is a launcher. You can use the below keybind to open it",
-                       note: "p.s. this keybind WILL be rebindable in settings in the future",
+                       note: "p.s. you can change it in settings",
                        keys: ["⌥", "Space"]),
         OnboardingStep(symbol: "magnifyingglass",
                        title: "Just start typing",
@@ -118,8 +125,7 @@ enum Onboarding {
                        hint: "Try it, press ↓ or ⌘1"),
         OnboardingStep(symbol: "checkmark.circle",
                        title: "You're all set",
-                       body: "You can change anything later in Ray Settings. You can also replay the onboarding there.",
-                       note: "Hope you enjoy the launcher, I know that ",
+                       body: "You can customise things in Ray Settings. You can also replay the onboarding there."
                       ),
     ]
 }
@@ -143,6 +149,9 @@ struct MarkerRenderer: TextRenderer {
 
 // GlassCard is shape/body of the launcher, everything the user sees and interacts with will be housed here
 struct GlassCard: ViewModifier {
+    @AppStorage("ray_custom_tint") private var customTint: RayThemes = .black
+    @AppStorage("ray_tint_strength") private var tintStrength: Double = 0.4
+    
     let radius: CGFloat
 
     func body(content: Content) -> some View {
@@ -150,7 +159,7 @@ struct GlassCard: ViewModifier {
         let edge = LinearGradient(colors: [Color.black.opacity(0.6), Color.black.opacity(0.6)], startPoint: .top, endPoint: .bottom)
         // I know it's barely noticable but why not
         return content
-            .rayGlassEffect(Color.black.opacity(0.22), interactive: true, in: s) // Glass is so good TODO: check if you can scale interaction intensity
+            .rayGlassEffect(customTint.colour.opacity(tintStrength), interactive: true, in: s) // Glass is so good TODO: check if you can scale interaction intensity
             .overlay(s.strokeBorder(edge, lineWidth: 0.6))
             .shadow(color: .black.opacity(0.35), radius: 22, y: 9)
     }
@@ -160,11 +169,14 @@ struct GlassCard: ViewModifier {
 struct ContentView: View {
     
     // The feel of the map
-    private static let dropdownSpring = Animation.spring(response: 0.42, dampingFraction: 0.72)
-    private static let rowSpring = Animation.spring(response: 0.32, dampingFraction: 0.78)
-    private static let selectionSpring = Animation.spring(response: 0.28, dampingFraction: 0.78)
+    @AppStorage("ray_motion_style") private var motionStyle: MotionStyle = .standard
+    private var reduceMotion: Bool { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion }
     
-    // Defaults
+    private func motion(_ role: MotionStyle.Role) -> Animation? {
+        motionStyle.animation(role, reduceMotion: reduceMotion)
+    }
+    
+    // Other defaults
     @AppStorage("ray_typing_delay") private static var typingDelay: Double = 0.8
     @AppStorage("ray_still_delay") private static var stillDelay: Double = 3.0
     @AppStorage("ray_onboarded") private var onboarded: Bool = false // Onboarding related
@@ -174,6 +186,9 @@ struct ContentView: View {
     @AppStorage("ray_note_draft_base") private var noteDraftBase: String = "" // What a draft was edited from, if anything
     @AppStorage("ray_marker_colour") private var markerColour: MarkerColour = .yellow
     @AppStorage("ray_marker_weight") private var markerWeight: MarkerBoldness = .verybold
+    @AppStorage("ray_show_utility_bar") var showUtilityBar = true
+    @AppStorage("ray_custom_tint") private var customTint: RayThemes = .black
+    @AppStorage("ray_tint_strength") private var tintStrength: Double = 0.4
     
     @State private var showingCamera = false
     @State private var showingClipboardHistory = false
@@ -199,7 +214,6 @@ struct ContentView: View {
     @State private var dropdownTask: Task<Void, Never>? = nil
     @State private var actionIndex: Int = 0
     @State private var lastMouseLocation: CGPoint = .zero
-    @State private var showUtilityBar: Bool = true
     @State private var updateStatus: AppUpdateChecker.UpdateStatus = .upToDate
     @State private var runningPaths: Set<String> = [] // Apps that are running right now, refreshed whenever the launcher opens
     @State private var loadedNote: String? = nil // The destination's content that was loaded into the editor, saving replaces it instead of adding it again
@@ -235,7 +249,19 @@ struct ContentView: View {
     private let dropdownRadius: CGFloat = 28
     private let dropdownInset: CGFloat = 8
     private let dropdownHeaderHeight: CGFloat = 36
-    private let selectionTint = Color.gray.opacity(0.3)
+    
+    
+    private var selectionTint: Color {
+        if customTint.colour == .white && tintStrength >= 0.3 {
+            Color.black.opacity(0.2)
+        } else if customTint.colour == .black {
+            Color.gray.opacity(0.3)
+        } else if customTint.colour != .white && tintStrength >= 0.2  {
+            Color.black.opacity(0.2)
+        } else {
+            Color.gray.opacity(0.3)
+        }
+    }
     
     // True while the launchpad is the note editor
     private var isNote: Bool {
@@ -294,6 +320,7 @@ struct ContentView: View {
     
     var body: some View {
         keyHandled
+            .foregroundStyle(customTint.appropriateTextColor(strength: tintStrength))
             .onChange(of: query) { _, newValue in queryChanged(newValue) }
             .onChange(of: mode) {
                 refresh(); scheduleDropdown()
@@ -307,7 +334,7 @@ struct ContentView: View {
                     }
                 }
                 
-                withAnimation(Self.dropdownSpring) { tileLayout = targetLayout }
+                withAnimation(motion(.dropdown)) { tileLayout = targetLayout }
                 refocus()
             }
             .onChange(of: cameraSelected) { _, selected in
@@ -317,8 +344,9 @@ struct ContentView: View {
                     CameraSession.shared.stop(after: 1.5)
                 }
             }
-            .onChange(of: showingCamera) {
-                withAnimation(Self.dropdownSpring) { tileLayout = targetLayout }
+            .onChange(of: showingCamera) { _, showing in
+                if !showing { CameraSession.shared.stop() } // was stop(after: 1.5)
+                withAnimation(motion(.dropdown)) { tileLayout = targetLayout }
             }
             .onChange(of: selection) { actionIndex = 0; closeAliasBubble() }
             .onChange(of: showingClipboardHistory) { refresh(); scheduleDropdown() } // swaps results between Find and the clipboard
@@ -333,6 +361,7 @@ struct ContentView: View {
             .task { await loadApps() }
             .task { await indexFiles() }
             .onAppear { focused = true; refresh(); scheduleDropdown() }
+            .onAppear { tintStrength = min(max(tintStrength, 0.1), customTint.maxStrength) } // Clamp helper
     }
     
     private var keyHandled: some View {
@@ -353,45 +382,17 @@ struct ContentView: View {
             .background { shortcutButtons }
     }
     
+    private var bar: UtilityBarManager { .shared }
+    
     // This is the raydar, launchpad and map
     private var stage: some View {
         GlassEffectContainer(spacing: 16) {
             VStack(spacing: 16) {
-                if showUtilityBar, let update = availableUpdate {
+                if let state = bar.state, showUtilityBar || bar.update?.isForced == true {
                     utilityBar {
-                        VStack {
-                            HStack {
-                                Image("git.diff")
-                                    .renderingMode(.template)
-                                    .font(.system(size: 28, weight: .heavy))
-                                    .opacity(0.9)
-                                
-                                VStack(alignment: .leading, spacing: 2) {
-                                    HStack(spacing: 0) {
-                                        Text("A new version of ray is ")
-                                        Link(destination: URL(string: "https://github.com/dylankaru/ray/releases/latest")!) {
-                                            FlowingGradientText(text: "available")
-                                        }
-                                        .pointerStyle(.link)
-                                        Text(".")
-                                    }
-                                    .font(.system(size: 13, weight: .medium))
-                                    
-                                    HStack(spacing: 2) {
-                                        Text("Update v\(AppVersionManager.currentVersion)")
-                                            .italic()
-                                        Image(systemName: "arrow.right")
-                                            .font(.system(size: 10, weight: .bold))
-                                        Text("v\(update.version)")
-                                            .italic()
-                                    }
-                                    .foregroundStyle(.secondary)
-                                    .font(.system(size: 10, weight: .regular))
-                                }
-                            }
-                        }
+                        UtilityBarContent(state: state)
                     }
-                }
+                } 
                 launcher // Launchpad
                 if dropdownVisible {
                     dropdown // Map
@@ -400,26 +401,8 @@ struct ContentView: View {
             .frame(width: stageWidth, alignment: .top)
             .overlay(alignment: .topLeading) { aliasBubbleOverlay }
         }
-        .animation(Self.dropdownSpring, value: dropdownVisible)
-        .animation(.smooth(duration: 0.16), value: mode)
-        .task {
-            #if DEBUG
-            updateStatus = .updateAvailable(version: "9.9.9", downloadURL: UpdateConfig.githubRepoLink, isForced: false)
-            #else
-            updateStatus = await AppUpdateChecker.shared.checkAppUpdate()
-            #endif
-        }
-    }
-    
-    private func checkForUpdates() async -> Bool {
-        let status = await AppUpdateChecker.shared.checkAppUpdate()
-        
-        switch status {
-        case .upToDate:
-            return false
-        case .updateAvailable:
-            return true
-        }
+        .animation(motion(.dropdown), value: dropdownVisible)
+        .animation(motion(.quick), value: mode)
     }
     
     // Utility bar for minimalism sake will only be visible if it's needed, like when an app related notification is due
@@ -510,10 +493,11 @@ struct ContentView: View {
     }
     
     // Fill and outline share one radius, strokeBorder keeps the outline inside the shape
+    @ViewBuilder
     private var tileBackground: some View {
         let shape = RoundedRectangle(cornerRadius: tileRadius, style: .continuous)
         
-        return ZStack {
+        ZStack {
             shape.fill(selectionTint)
             shape.strokeBorder(Color.accentColor.opacity(0.45), lineWidth: 0.6)
         }
@@ -737,7 +721,7 @@ struct ContentView: View {
                 .monospacedDigit()
                 .foregroundStyle(calcResult == nil ? Color.secondary.opacity(0.5) : Color.primary)
                 .contentTransition(.numericText())
-                .animation(.snappy(duration: 0.12), value: calcResult)
+                .animation(motion(.quick), value: calcResult)
                 .lineLimit(1)
                 .minimumScaleFactor(0.4)
                 .frame(height: 84)
@@ -788,22 +772,22 @@ struct ContentView: View {
         }
     }
     
-    // Tooltip to run the action
+    // Tooltip to nudge the action
+    @ViewBuilder
     private var actionChip: some View {
-        let dim: Bool = (currentAction == nil)
-        
-        return HStack(spacing: 6) {
-            Image(systemName: currentAction?.icon ?? "arrowshape.turn.up.right")
-                .font(.system(size: 11, weight: .medium))
-            Text(currentAction?.title ?? "Action")
-                .font(.system(size: 12, weight: .medium))
+        if let action = currentAction {
+            HStack(spacing: 6) {
+                Image(systemName: action.icon)
+                    .font(.system(size: 11, weight: .medium))
+                Text(action.title)
+                    .font(.system(size: 12, weight: .medium))
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+            .background(Capsule().fill(Color.white.opacity(0.10)))
+            .contentShape(Capsule())
+            .onTapGesture { cycleAction(1); focused = true }
         }
-        .foregroundStyle(dim ? Color.secondary.opacity(0.5) : Color.primary.opacity(0.9))
-        .padding(.horizontal, 12)
-        .padding(.vertical, 6)
-        .background(Capsule().fill(Color.white.opacity(0.10)))
-        .contentShape(Capsule())
-        .onTapGesture { cycleAction(1); focused = true }
     }
     
     // Part of the aesthetic of ray is that it isn't visible so we take up less space
@@ -850,16 +834,21 @@ struct ContentView: View {
             ForEach(Array(results.enumerated()), id: \.element.id) { i, item in
                 row(item, index: i)
                     .opacity(rowsRevealed ? 1 : 0)
-                    .offset(y: rowsRevealed ? 0 : -8)
-                    .animation(Self.rowSpring.delay(0.25 + Double(i) * 0.03), value: rowsRevealed)
+                    .offset(y: (rowsRevealed || reduceMotion) ? 0 : -8)
+                    .animation(motion(.row)?.delay(rowDelay(i)), value: rowsRevealed)
                     .swipeActions(edge: .trailing, allowsFullSwipe: true) { swipeButton(.trailing, item: item, index: i) }
                     .swipeActions(edge: .leading, allowsFullSwipe: true) { swipeButton(.leading, item: item, index: i) }
             }
         }
         .padding(.horizontal, dropdownInset)
         .padding(.bottom, dropdownInset)
-        .animation(Self.selectionSpring, value: selection)
+        .animation(motion(.selection), value: selection)
         .clipped()
+    }
+    
+    private func rowDelay(_ i: Int) -> Double {
+        guard !reduceMotion else { return 0 }
+        return 0.25 + Double(i) * motionStyle.stagger(reduceMotion: reduceMotion)
     }
     
     private var onboardingContent: some View {
@@ -873,7 +862,7 @@ struct ContentView: View {
                     .transition(.opacity.combined(with: .offset(y: 10)))
             }
             .frame(maxWidth: .infinity, minHeight: 250)
-            .animation(Self.rowSpring, value: onboardingStep)
+            .animation(motion(.row), value: onboardingStep)
             
             onboardingFooter(last: last)
         }
@@ -901,12 +890,15 @@ struct ContentView: View {
                 .padding(.top, 4)
             }
             
-            Text (step.note ?? "")
-                .font(.system(size: 8))
-                .monospaced()
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .fixedSize(horizontal: false, vertical: true)
+            if let note = step.note, !note.isEmpty {
+                Text(note)
+                    .font(.system(size: 8))
+                    .monospaced()
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.top, 6)
+            }
             
             if step.showsMarkerDemo {
                 markerDemo
@@ -949,7 +941,7 @@ struct ContentView: View {
         .padding(.top, 8)
         .id(taskDone)
         .transition(.scale(scale: 0.92, anchor: .leading).combined(with: .opacity))
-        .animation(Self.rowSpring, value: taskDone)
+        .animation(motion(.row), value: taskDone)
     }
     
     // Shows the marker highlight with the real renderer, "saf" lighting up the start of Safari
@@ -1014,7 +1006,7 @@ struct ContentView: View {
                     .onTapGesture { goToStep(i) }
             }
         }
-        .animation(Self.rowSpring, value: onboardingStep)
+        .animation(motion(.row), value: onboardingStep)
     }
     
     private func advanceOnboarding() {
@@ -1186,6 +1178,7 @@ struct ContentView: View {
         }
     }
     
+    // TODO: something, ill remember what it was later, i forgor :/
     private func keycap(_ s: String) -> some View {
         Text(s)
             .font(.system(size: 10.5, weight: .medium, design: .rounded))
@@ -1235,7 +1228,7 @@ struct ContentView: View {
         case .highlighter:
             return Text(text).customAttribute(MarkedAttribute())
         case .underline:
-            return Text(text).underline(true, color: .white)
+            return Text(text).underline(true, color: customTint.appropriateTextColor(strength: tintStrength))
         case .bold:
             return Text(text).fontWeight(markerWeight.weight)
         }
@@ -1454,7 +1447,7 @@ struct ContentView: View {
         aliasList = AliasStore.aliases(for: item.id)
         aliasDraft = ""
         aliasRow = row
-        withAnimation(.smooth(duration: 0.22)) {
+        withAnimation(motion(.quick)) {
             aliasTarget = item
             aliasContentIn = true
         }
@@ -1499,7 +1492,7 @@ struct ContentView: View {
                         Button {
                             if let item = aliasTarget {
                                 AliasStore.remove(alias, from: item.id)
-                                withAnimation(Self.rowSpring) { aliasList = AliasStore.aliases(for: item.id) }
+                                withAnimation(motion(.row)) { aliasList = AliasStore.aliases(for: item.id) }
                             }
                         } label: {
                             HStack(spacing: 3) {
@@ -1577,12 +1570,17 @@ struct ContentView: View {
             showingClipboardHistory = false
             return .handled
         }
+        if showingCamera {
+            showingCamera = false
+            selection = 0
+            refresh()
+            return .handled
+        }
         if dropdownVisible {
             closeDropdown()
         } else {
             hide()
         }
-        if showingCamera { showingCamera = false; return .handled }
         return .handled
     }
 
@@ -1659,7 +1657,7 @@ struct ContentView: View {
             CameraSession.shared.start()
             query = ""
             closeDropdown()
-            withAnimation(Self.dropdownSpring) {
+            withAnimation(motion(.dropdown)) {
                 showingCamera = true
                 tileLayout = .camera
             }
@@ -1849,6 +1847,9 @@ struct ContentView: View {
         let keepID: String? = results.indices.contains(selection) ? results[selection].id : nil
 
         var out: [Item] = []
+        
+        // Used to prewarm the camera but it had issues so no longer
+        
         if q.isEmpty {
             out = Search.rank("", in: pool, limit: 8)
         } else {
@@ -1952,6 +1953,7 @@ struct ContentView: View {
             calcResult = nil
             showingClipboardHistory = false
             showingCamera = false
+            CameraSession.shared.stop()
             aliasTarget = nil
             aliasDraft = ""
         }

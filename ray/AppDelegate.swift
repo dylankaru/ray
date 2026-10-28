@@ -19,10 +19,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private static var settingsWindow: NSWindow?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        UtilityBarManager.shared.start()
         AppDelegate.current = self
 
         panel = LauncherPanel(rootView: ContentView())
-        HotKey.register { [weak self] in self?.togglePanel() }
+
+        KeybindStore.shared.start { [weak self] action in
+            switch action {
+            case .toggleRay:
+                self?.togglePanel()
+            case .openApp(let path):
+                NSWorkspace.shared.openApplication(at: URL(fileURLWithPath: path),
+                                                   configuration: NSWorkspace.OpenConfiguration())
+            }
+        }
+
+        observeSystemState()
+
         setUpMenuBar()
         CameraSession.shared.prepare()
 
@@ -79,14 +92,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(.accessory) // no Dock icon, hotkey only
     }
 
+    // orderOut first clears any stale window-server state (it also posts .rayReset via the panel override)
     private func showTransient() {
-        NotificationCenter.default.post(name: .rayReset, object: nil) // open fully empty
+        panel.orderOut(nil)
         panel.positionOnActiveScreen()
         panel.makeKeyAndOrderFront(nil) // no NSApp.activate, skips the app switch
     }
 
     private func togglePanel() {
-        if panel.isVisible {
+        if panel.isVisible && panel.isKeyWindow {
             dismissPanel()
         } else {
             showTransient()
@@ -138,14 +152,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         let menu = NSMenu()
-        
+
         let version = menu.addItem(withTitle: "ray Version \(AppVersionManager.currentVersion)", action: nil, keyEquivalent: "")
-        version.target = self
         version.isEnabled = false
 
         let open = menu.addItem(withTitle: "Open Ray", action: #selector(openFromMenu), keyEquivalent: "")
         open.target = self
- 
+
         let settings = menu.addItem(withTitle: "Settings…", action: #selector(settingsFromMenu), keyEquivalent: ",")
         settings.target = self
 
@@ -156,6 +169,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         item.menu = menu
         statusItem = item
+    }
+
+    // MARK: Sleep, wake, lock
+
+    private func observeSystemState() {
+        let ws = NSWorkspace.shared.notificationCenter
+        for name in [NSWorkspace.didWakeNotification, NSWorkspace.screensDidWakeNotification] {
+            ws.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in self?.rearm() }
+        }
+
+        let dnc = DistributedNotificationCenter.default()
+        for name in ["com.apple.screenIsUnlocked", "com.apple.screensaver.didstop"] {
+            dnc.addObserver(forName: Notification.Name(name), object: nil, queue: .main) { [weak self] _ in self?.rearm() }
+        }
+    }
+
+    private func rearm() {
+        if panel.isVisible { dismissPanel() }
+        KeybindStore.shared.restart()
     }
 
     @objc private func openFromMenu() {

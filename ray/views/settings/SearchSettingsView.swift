@@ -64,7 +64,7 @@ struct SearchSettingsView: View {
         .formStyle(.grouped)
     }
     
-    private func slider(_ title: String, value: Binding<Double>, range: ClosedRange<Double>, unit: String) -> some View {
+    private func slider(_ title: String, value: Binding<Double>, range: ClosedRange<Double>, unit: String = "") -> some View {
         LabeledContent(title) {
             HStack(spacing: 10) {
                 Slider(value: value, in: range, step: 0.1)

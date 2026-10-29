@@ -191,6 +191,9 @@ struct ContentView: View {
     
     @State private var showingCamera = false
     @State private var showingClipboardHistory = false
+    @State private var showingEmoji = false // The emoji dictionary, the map becomes a grid of emoji
+    private let emojiColumns = 8
+    @State private var scrollToSelection = true // off while the mouse is driving, so hovering never scrolls the grid
     @State private var aliasContentIn: Bool = false // the bubble's contents fade in a beat after the bubble itself
     
     private let cameraTileSize = CGSize(width: 560, height: 315)
@@ -213,7 +216,6 @@ struct ContentView: View {
     @State private var dropdownTask: Task<Void, Never>? = nil
     @State private var actionIndex: Int = 0
     @State private var lastMouseLocation: CGPoint = .zero
-    @State private var updateStatus: AppUpdateChecker.UpdateStatus = .upToDate
     @State private var runningPaths: Set<String> = [] // Apps that are running right now, refreshed whenever the launcher opens
     @State private var loadedNote: String? = nil // The destination's content that was loaded into the editor, saving replaces it instead of adding it again
     @State private var tileLayout: TileLayout = .compact
@@ -228,15 +230,6 @@ struct ContentView: View {
     private let clipboard = ClipboardManager.shared // shared, starts recording at launch
     @Namespace private var ns
     @Namespace private var glassNS
-    
-    private var availableUpdate: (version: String, url: URL?, isForced: Bool)? {
-        if case let .updateAvailable(version, url, isForced) = updateStatus {
-            return (version, url, isForced)
-        }
-        return nil
-    }
-
-    private var isUpdateAvailable: Bool { availableUpdate != nil }
     
     private let tileSize: CGFloat = 240
     private let noteTileSize = CGSize(width: 348, height: 252) // Note mode, wider than tall so there's room to write
@@ -291,7 +284,7 @@ struct ContentView: View {
     }
     
     private var dropdownVisible: Bool {
-        if showingClipboardHistory { return true }
+        if showingClipboardHistory || showingEmoji { return true }
         if showingCamera { return false }
         if doOnboarding { return showDropdown }
         return showDropdown && results.count > 1 && mode != .calc // If there is only one result what's the point of the dropdown
@@ -349,6 +342,7 @@ struct ContentView: View {
             }
             .onChange(of: selection) { actionIndex = 0; closeAliasBubble() }
             .onChange(of: showingClipboardHistory) { refresh(); scheduleDropdown() } // swaps results between Find and the clipboard
+            .onChange(of: showingEmoji) { refresh(); scheduleDropdown() } // swaps results between Find and the emoji
             .onChange(of: clipboard.items) { if showingClipboardHistory { refresh() } }
             .onChange(of: dropdownVisible) { _, visible in revealRows(visible); if !visible { closeAliasBubble() }}
             .onReceive(NotificationCenter.default.publisher(for: .rayReset)) { _ in reset() }
@@ -366,7 +360,7 @@ struct ContentView: View {
     private var keyHandled: some View {
         framed
             .onKeyPress(.downArrow) { handleDown() }
-            .onKeyPress(.upArrow)   { move(-1); return .handled }
+            .onKeyPress(.upArrow)   { move(showingEmoji ? -emojiColumns : -1); return .handled }
             .onKeyPress(.leftArrow)  { handleSide(.leading) }  // ← Reveal in Finder
             .onKeyPress(.rightArrow) { handleSide(.trailing) } // → Open With (files), Set Alias (apps and commands)
             .onKeyPress(.escape)    { handleEscape() }
@@ -387,11 +381,11 @@ struct ContentView: View {
     private var stage: some View {
         RayGlassContainer(spacing: 16) {
             VStack(spacing: 16) {
-                if let state = bar.state, showUtilityBar || bar.update?.isForced == true {
+                if let state = bar.state {
                     utilityBar {
                         UtilityBarContent(state: state)
                     }
-                } 
+                }
                 launcher // Launchpad
                 if dropdownVisible {
                     dropdown // Map
@@ -734,10 +728,13 @@ struct ContentView: View {
         }
     }
     
-    // Apps and files get their real icon, everything else (web, notes) gets a symbol
     @ViewBuilder
     private func bigIcon(_ item: Item) -> some View {
-        if let path = item.iconPath {
+        if let e = item.emoji {
+            Text(e)
+                .font(.system(size: 64))
+                .frame(height: 84)
+        } else if let path = item.iconPath {
             Image(nsImage: IconCache.icon(for: path))
                 .resizable()
                 .interpolation(.high)
@@ -813,7 +810,7 @@ struct ContentView: View {
                 onboardingContent
             } else {
                 dropdownHeader
-                dropdownContent
+                if resultsAreEmoji { emojiGrid } else { dropdownContent }
             }
         }
         .frame(width: 380)
@@ -843,6 +840,47 @@ struct ContentView: View {
         .padding(.bottom, dropdownInset)
         .animation(motion(.selection), value: selection)
         .clipped()
+    }
+    
+    private var resultsAreEmoji: Bool {
+        results.first?.id.hasPrefix("emoji:") == true
+    }
+    
+    private var emojiGrid: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 2), count: emojiColumns), spacing: 2) {
+                    ForEach(Array(results.enumerated()), id: \.element.id) { i, item in
+                        Text(item.emoji ?? "")
+                            .font(.system(size: 24))
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 40)
+                            .background {
+                                if i == selection {
+                                    RoundedRectangle(cornerRadius: dropdownRadius - dropdownInset, style: .continuous).fill(selectionTint)
+                                }
+                            }
+                            .contentShape(Rectangle())
+                            .onTapGesture { selection = i; run() }
+                            .onHover { hovering in
+                                if hovering { scrollToSelection = false }
+                                hover(hovering, index: i)
+                            }
+                            .id(item.id)
+                    }
+                }
+                .id(trimmedQuery)
+                .padding(.horizontal, dropdownInset)
+                .padding(.vertical, dropdownInset)
+            }
+            .contentMargins(.vertical, dropdownInset, for: .scrollContent)
+            .frame(height: 6 * 42)
+            .onChange(of: selection) { _, new in
+                guard scrollToSelection, results.indices.contains(new) else { return }
+                proxy.scrollTo(results[new].id)
+            }
+        }
+//        .padding(.bottom, dropdownInset)
     }
     
     private func rowDelay(_ i: Int) -> Double {
@@ -1083,7 +1121,7 @@ struct ContentView: View {
     
     private var dropdownHeader: some View {
         HStack(spacing: 6) {
-            Text(showingClipboardHistory ? "Clipboard History" : (query.isEmpty ? "Suggestions" : "\(results.count) results"))
+            Text(showingClipboardHistory ? "Clipboard History" : showingEmoji ? (query.isEmpty ? "Emoji" : "\(results.count) results") : (query.isEmpty ? "Suggestions" : "\(results.count) results"))
                 .font(.system(size: 11.5, weight: .semibold))
                 .foregroundStyle(.secondary)
             if !query.isEmpty {
@@ -1093,7 +1131,7 @@ struct ContentView: View {
                     .lineLimit(1)
             }
             Spacer()
-            keycap("↑↓")
+            keycap(showingEmoji ? "↑↓←→" : "↑↓")
         }
         .padding(.horizontal, 22)
         .padding(.top, 14)
@@ -1251,7 +1289,13 @@ struct ContentView: View {
             return [PaneAction(title: "Search", icon: "arrow.up.right", run: item.action)]
         }
         if item.id == "cmd:camera" {
-            return [PaneAction(title: "Open", icon: "web.camera", keepsOpen: true, run: item.action)]
+            return [PaneAction(title: "Open", icon: "arrow.up.right", keepsOpen: true, run: item.action)]
+        }
+        if item.id == "cmd:emoji" {
+            return [PaneAction(title: "Open", icon: "arrow.up.right", keepsOpen: true, run: item.action)]
+        }
+        if item.id.hasPrefix("emoji:") {
+            return [PaneAction(title: "Copy", icon: "doc.on.doc", run: item.action)]
         }
         if let path = item.iconPath {
             let url = URL(fileURLWithPath: path)
@@ -1316,7 +1360,7 @@ struct ContentView: View {
             dropdownTask?.cancel()
             showDropdown = true
         } else {
-            move(1)
+            move(showingEmoji ? emojiColumns : 1)
         }
         return .handled
     }
@@ -1345,7 +1389,7 @@ struct ContentView: View {
 
     // nil means this row has nothing for that arrow, so the key falls through and the swipe shows nothing
     private func sideAction(_ side: Side, for item: Item, at index: Int?) -> SideAction? {
-        guard mode == .find, !doOnboarding, !showingClipboardHistory else { return nil }
+        guard mode == .find, !doOnboarding, !showingClipboardHistory, !showingEmoji else { return nil }
 
         // Commands have no file path, so the only thing on offer is → Set Alias
         if item.id.hasPrefix("cmd:") {
@@ -1402,7 +1446,7 @@ struct ContentView: View {
     private func menuAnchor(forRow index: Int?) -> NSPoint {
         guard let panel = NSApp.windows.compactMap({ $0 as? LauncherPanel }).first else { return NSEvent.mouseLocation }
 
-        let barHeight: CGFloat = (showUtilityBar && isUpdateAvailable) ? 60 + 16 : 0
+        let barHeight: CGFloat = showUtilityBar ? 60 + 16 : 0
         var y: CGFloat = 60 + barHeight + launcherSize.height // bottom edge of the launchpad, measured from the top of the window
         if dropdownVisible, let i = index {
             y += 16 + dropdownHeaderHeight + CGFloat(i) * (rowHeight + 1) + rowHeight // bottom edge of row i
@@ -1411,6 +1455,11 @@ struct ContentView: View {
     }
 
     private func handleSide(_ side: Side) -> KeyPress.Result {
+        // In the emoji grid left and right just move through the grid
+        if showingEmoji, aliasTarget == nil {
+            move(side == .leading ? -1 : 1)
+            return .handled
+        }
         guard aliasTarget == nil else { return .ignored }
         guard !doOnboarding, !showingClipboardHistory, mode == .find,
               dropdownVisible, results.indices.contains(selection) else { return .ignored }
@@ -1532,7 +1581,7 @@ struct ContentView: View {
     @ViewBuilder
     private var aliasBubbleOverlay: some View {
         if aliasTarget != nil {
-            let barHeight: CGFloat = (showUtilityBar && isUpdateAvailable) ? 60 + 16 : 0
+            let barHeight: CGFloat = showUtilityBar ? 60 + 16 : 0
             
             let edgeWidth: CGFloat = (aliasRow != nil) ? 380 : launcherSize.width
             let x = (stageWidth + edgeWidth) / 2 + 4
@@ -1567,6 +1616,11 @@ struct ContentView: View {
         }
         if showingClipboardHistory { // esc leaves clipboard history first, the next esc closes Ray as usual
             showingClipboardHistory = false
+            return .handled
+        }
+        if showingEmoji {
+            showingEmoji = false
+            refresh()
             return .handled
         }
         if showingCamera {
@@ -1610,6 +1664,7 @@ struct ContentView: View {
 
     private func step(_ d: Int) {
         showingClipboardHistory = false
+        showingEmoji = false
         showingCamera = false
         let all: [Mode] = Mode.allCases
         let next: Mode = all[(mode.rawValue + d + all.count) % all.count]
@@ -1625,6 +1680,7 @@ struct ContentView: View {
             return
         }
         guard !results.isEmpty else { return }
+        scrollToSelection = true
         selection = max(0, min(results.count - 1, selection + d))
     }
 
@@ -1640,11 +1696,17 @@ struct ContentView: View {
                 NSWorkspace.shared.openApplication(at: url, configuration: NSWorkspace.OpenConfiguration())
             })
         }
-        pool = items + [settingsItem, notesItem, cameraItem, clipboardHistoryItem]
+        pool = items + [settingsItem, notesItem, cameraItem, clipboardHistoryItem, emojiItem]
         refresh()
     }
 
-    // Not an app, but it lives in the same search so typing "settings" finds it
+    private var emojiItem: Item {
+        Item(id: "cmd:emoji", title: "Emoji Dictionary", icon: "face.smiling", subtitle: "Command") {
+            query = ""
+            showingEmoji = true
+        }
+    }
+    
     private var settingsItem: Item {
         Item(id: "cmd:settings", title: "Ray Settings", icon: "gearshape", subtitle: "Command") {
             AppDelegate.openSettings()
@@ -1699,6 +1761,7 @@ struct ContentView: View {
     // Runs off the main thread, then merges into the Find results when it's done
     // Typing again cancels the search that's still running, so old scans never pile up
     private func searchFiles(_ q: String) {
+        guard !showingEmoji else { return }
         fileSearchTask?.cancel()
         guard !showingClipboardHistory else { return }
 
@@ -1790,6 +1853,24 @@ struct ContentView: View {
         }
     }
 
+    private func emojiItems() -> [Item] {
+        let tokens = trimmedQuery.lowercased().split(separator: " ").map(String.init)
+        let all = EmojiStore.all
+        var matches = all
+        if let first = tokens.first {
+            let hits = all.filter { e in tokens.allSatisfy { e.name.contains($0) } }
+            matches = hits.filter { $0.name.hasPrefix(first) } + hits.filter { !$0.name.hasPrefix(first) }
+        }
+        return matches.map { e in
+            var item = Item(id: "emoji:\(e.glyph)", title: e.name.capitalized, icon: "face.smiling") {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(e.glyph, forType: .string)
+            }
+            item.emoji = e.glyph
+            return item
+        }
+    }
+
     private func refresh() {
         if showingClipboardHistory { // clipboard history replaces the Find results while it's open
             fileSearchTask?.cancel()
@@ -1797,6 +1878,14 @@ struct ContentView: View {
             calcResult = nil
             results = clipboardItems()
             selection = min(selection, max(0, results.count - 1))
+            return
+        }
+        if showingEmoji { // so does the emoji dictionary
+            fileSearchTask?.cancel()
+            filesPending = false
+            calcResult = nil
+            results = emojiItems()
+            selection = 0
             return
         }
         let q: String = trimmedQuery
@@ -1840,6 +1929,7 @@ struct ContentView: View {
     // Find results are apps first, then files, then web search always last
     // preserveSelection keeps you on the same row when files arrive late, but only if you had moved off the top one
     private func recomputeFind(preserveSelection: Bool) {
+        guard !showingEmoji else { return }
         guard !showingClipboardHistory else { return } // late file results must not overwrite the clipboard rows
         let q: String = trimmedQuery
         calcResult = nil
@@ -1951,6 +2041,7 @@ struct ContentView: View {
             fileHits = []
             calcResult = nil
             showingClipboardHistory = false
+            showingEmoji = false
             showingCamera = false
             CameraSession.shared.stop()
             aliasTarget = nil

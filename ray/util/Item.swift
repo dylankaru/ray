@@ -18,6 +18,7 @@ struct Item: Identifiable {
     let iconPath: String?
     let bytes: [UInt8]
     let aliases: [[UInt8]]
+    var emoji: String? = nil
     let action: () -> Void
 
     init(id: String, title: String, icon: String, subtitle: String? = nil,

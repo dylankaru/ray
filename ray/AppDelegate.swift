@@ -159,7 +159,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let open = menu.addItem(withTitle: "Open Ray", action: #selector(openFromMenu), keyEquivalent: "")
         open.target = self
 
-        let settings = menu.addItem(withTitle: "Settings…", action: #selector(settingsFromMenu), keyEquivalent: ",")
+        let settings = menu.addItem(withTitle: "Settings", action: #selector(settingsFromMenu), keyEquivalent: ",")
         settings.target = self
 
         menu.addItem(.separator())
@@ -170,8 +170,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         item.menu = menu
         statusItem = item
     }
-
-    // MARK: Sleep, wake, lock
 
     private func observeSystemState() {
         let ws = NSWorkspace.shared.notificationCenter

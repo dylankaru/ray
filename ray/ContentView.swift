@@ -873,14 +873,14 @@ struct ContentView: View {
                 .padding(.horizontal, dropdownInset)
                 .padding(.vertical, dropdownInset)
             }
-            .contentMargins(.vertical, dropdownInset, for: .scrollContent)
+//            .contentMargins(.vertical, dropdownInset + 50, for: .scrollContent)
             .frame(height: 6 * 42)
             .onChange(of: selection) { _, new in
                 guard scrollToSelection, results.indices.contains(new) else { return }
                 proxy.scrollTo(results[new].id)
             }
         }
-//        .padding(.bottom, dropdownInset)
+        .padding(.bottom, dropdownInset)
     }
     
     private func rowDelay(_ i: Int) -> Double {

@@ -19,6 +19,7 @@ struct Keybind: Codable, Hashable {
 
 enum KeybindAction: Codable, Hashable {
     case toggleRay
+    case toggleIvyWithinRayInstantly
     case openApp(path: String)
 }
 

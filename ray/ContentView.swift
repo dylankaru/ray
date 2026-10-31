@@ -18,6 +18,8 @@ import SwiftUI
  Trigger:   the suggested/main action given in the launchpad
  Option:    a suggested in the list of given possible actions in the map
  
+ btw it should technically be v0.x not v1.x but im silly so i forgot 😁
+ 
  v1.1:
  >  I've changed the consumer names because they seem pretty poorly named
  
@@ -26,6 +28,12 @@ import SwiftUI
  > Ive added a bunch of stuff in no particular order: tint, strength of tint, motion intensity controls, basic keybind remapping
  > camera item
  > Also added a birthday ting
+ 
+ v1.3:
+ > added support for systems old as macos 15.6 i think, though i dont have an old mac to test the ui on but i have a friend who has an old mac, it might be on sequoia so ill check if he can check it for me
+ > Also added emoji dictionary to search for emojis, it works and is functional but the ui is still a bit bad ykwis so ill have to fix that later soon too
+ > Added keybind rebinding support and made some changes to the birthday thing again making a new custom input for better intuitive usage,, still not finished tho
+ > also forgot camera wasn't flipped :/
  */
 
 // Mode is what the launcher is currently doing with what you type

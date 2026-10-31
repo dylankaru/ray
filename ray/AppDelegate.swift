@@ -28,9 +28,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             switch action {
             case .toggleRay:
                 self?.togglePanel()
+            case .toggleIvyWithinRayInstantly:
+                self?.togglePanel()
             case .openApp(let path):
-                NSWorkspace.shared.openApplication(at: URL(fileURLWithPath: path),
-                                                   configuration: NSWorkspace.OpenConfiguration())
+                let url = URL(fileURLWithPath: path)
+                NSWorkspace.shared.openApplication(at: url, configuration: NSWorkspace.OpenConfiguration())
             }
         }
 

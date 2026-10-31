@@ -101,7 +101,7 @@ final class PreviewView: NSView {
     private func applyMirroring(retries: Int) {
         if let conn = (layer as? AVCaptureVideoPreviewLayer)?.connection, conn.isVideoMirroringSupported {
             conn.automaticallyAdjustsVideoMirroring = false
-            conn.isVideoMirrored = false
+            conn.isVideoMirrored = true
         } else if retries > 0 {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
                 self?.applyMirroring(retries: retries - 1)

@@ -21,5 +21,6 @@ struct rayApp: App {
 // TODO: make the dropdown more customisable or add a mini dashboard
 // TODO: --> as in make it so that they can get quick stats to glance like maybe a friends birthday is tday or smth
 // TODO: praj said to add animations to spawning and despawning the bag
-// TODO: add emoji thing and maybe even emoji kitchen to that too, that would be aura
+// TODO: emoji kitchen
 // TODO: maybe more tints too?
+// TODO: theres a bug where when transitioning to notes the animation lags behind

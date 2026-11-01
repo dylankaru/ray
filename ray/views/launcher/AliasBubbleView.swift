@@ -1,5 +1,5 @@
 //
-//  AliasBubble.swift
+//  AliasBubbleView.swift
 //  ray
 //
 //  Created by Dylan Karunanayake on 1/11/2026.
@@ -7,7 +7,7 @@
 
 import SwiftUI
 
-/// Positions the bubble so its arrow touches the trailing edge of the row, or of the launchpad when the map is closed
+// Position the bubble so its arrow touches the trailing edge of the row, or of the launchpad when the map is closed
 struct AliasBubbleOverlay: View {
     @EnvironmentObject private var model: LauncherModel
     let glassNS: Namespace.ID

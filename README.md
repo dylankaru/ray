@@ -1,6 +1,8 @@
 # ray
 A lightweight, keyboard-driven launcher for macOS
 
+![Screenshot of ray](/screenshots/1.png)   
+
 This is a early version of the `README.md`, but I plan to flesh it out around v1.5 or so. If I'm being honest I've actually messed up the version number scheme, all of these should be version 0.x but I don't really feel its a massive issue.
 
 ## How to use
